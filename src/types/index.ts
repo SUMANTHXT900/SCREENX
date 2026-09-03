@@ -55,25 +55,9 @@ export type PendingCaptureId = string;
 
 export type PendingCapture = CaptureResult;
 
-export interface ExtensionMessage {
-  type: string;
-  payload?: unknown;
-}
+// ── Messaging & UI types (re-exported from src/messaging) ────────────
 
-export interface ToastOptions {
-  type: "success" | "error";
-  message: string;
-  title?: string;
-}
-
-export interface ProgressPayload {
-  mode?: string;
-  stage?: string;
-  percent?: number;
-  currentChunk?: number;
-  totalChunks?: number;
-  [key: string]: unknown;
-}
+export * from "../messaging";
 
 // ── Stubs for future steps ──────────────────────────────────────────
 

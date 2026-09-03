@@ -116,6 +116,41 @@ export async function deleteCapture(id: string): Promise<void> {
   }
 }
 
+export async function listCaptures(limit = 100): Promise<CaptureRecord[]> {
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDB();
+    const records = await new Promise<CaptureRecord[]>((resolve, reject) => {
+      const tx = db!.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const index = store.index("createdAt");
+      const results: CaptureRecord[] = [];
+      const req = index.openCursor(null, "prev");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor && results.length < limit) {
+          results.push(cursor.value as CaptureRecord);
+          cursor.continue();
+        } else {
+          resolve(results);
+        }
+      };
+      req.onerror = () => reject(req.error ?? new Error("list failed"));
+    });
+    return records;
+  } catch (e) {
+    if (e instanceof CaptureError) throw e;
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new CaptureError("STORAGE_FAILED", `IndexedDB list failed: ${msg}`, { cause: e as Error });
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export function dataUrlToBlob(dataUrl: string): Blob {
   // data:[<mediatype>][;base64],<data>
   const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);

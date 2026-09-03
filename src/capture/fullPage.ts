@@ -1,16 +1,15 @@
 import { CaptureError, type CaptureResult, type ToastOptions, type ProgressPayload } from "@/types";
 import { storePendingCapture } from "@/storage/captureHandoff";
-import { stitchImages, type StitchChunk } from "./stitch";
+import { stitchImages } from "./stitch";
 import { ensureContentScript } from "./ensureContent";
 import { calculatePositions, calculateTotalTimeout, isRestrictedUrl, queryActiveTab, withTimeout } from "./captureUtils";
-import { captureVisibleTabThrottled } from "./captureVisibleTab";
+import { executeCaptureLoop } from "./engine/captureLoop";
 
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
 
 const CONTENT_TIMEOUT_MS = 3500;
-const CAPTURE_TIMEOUT_MS = 6000; // allow for throttling + retry
 const SCROLL_STABILIZE_MS = 160;
 
 // ---------------------------------------------------------------------------
@@ -135,7 +134,6 @@ function sendProgress(tabId: number, progress: ProgressPayload): void {
 
 export async function captureFullPage(): Promise<CaptureResult> {
   acquireLock();
-  const start = Date.now();
   const t0 = performance.now();
   let perfScroll = 0;
   let perfCapture = 0;
@@ -242,125 +240,20 @@ export async function captureFullPage(): Promise<CaptureResult> {
     const totalTimeout = calculateTotalTimeout(positions.length, SCROLL_STABILIZE_MS, 600, 2000);
     console.debug("[ScreenX] fullPage positions", JSON.stringify({ count: positions.length, positions, totalTimeout, occlusions: { top: occludedTopHeight, bottom: occludedBottomHeight } }));
 
-    const chunks: StitchChunk[] = [];
     const perfPlanning = performance.now() - t0;
 
-    for (let i = 0; i < positions.length; i++) {
-      const requestedY = positions[i]!;
-      const completedChunks = i;
+    const loopResult = await executeCaptureLoop({
+      tabId: tab.id,
+      windowId: tab.windowId,
+      mode: "full-page",
+      positions,
+      totalTimeout,
+      controllerType: metrics.controllerType,
+    });
 
-      if (Date.now() - start > totalTimeout) {
-        throw new CaptureError("TIMEOUT", `Full-page capture exceeded ${Math.round(totalTimeout / 1000)}s at chunk ${i + 1}/${positions.length} (requestedY=${requestedY}). Page may be too large.`);
-      }
-
-      sendProgress(tab.id, {
-        mode: "full-page",
-        stage: "Scrolling...",
-        percent: Math.round((completedChunks / totalChunks) * 100),
-        currentChunk: i + 1,
-        totalChunks,
-        currentY: requestedY,
-      });
-
-      // Scroll and get actual position
-      const tScrollStart = performance.now();
-      const scrollRes = await withTimeout(
-        sendToContent<{ ok: boolean; actualX?: number; actualY?: number; error?: string }>(tab.id, { type: "SCREENX_SCROLL_TO", x: 0, y: requestedY }),
-        CONTENT_TIMEOUT_MS,
-        `Scroll to y=${requestedY}`
-      );
-      perfScroll += performance.now() - tScrollStart;
-
-      if (!scrollRes.ok) {
-        let errJson: { code?: string; actualX?: number; actualY?: number } | null = null;
-        try {
-          errJson = JSON.parse(scrollRes.error || "{}");
-        } catch {
-          errJson = null;
-        }
-        
-        if (errJson && errJson.code === "SCROLL_POSITION_UNSTABLE") {
-          console.warn(`[ScreenX] Scroll to ${requestedY} repeatedly failed. Settled at ${errJson.actualY}. Continuing with actual position.`);
-          scrollRes.actualY = errJson.actualY;
-          scrollRes.actualX = errJson.actualX;
-        } else {
-          throw new CaptureError("SCROLL_POSITION_UNSTABLE", scrollRes.error || "Scroll failed");
-        }
-      }
-
-      const actualY = scrollRes.actualY ?? requestedY;
-      const actualX = scrollRes.actualX ?? 0;
-
-      // Duplicate scroll position validation
-      if (i > 0 && actualY <= chunks[i - 1]!.y) {
-        const duplicateInfo = {
-          stage: "DUPLICATE_SCROLL_POSITION",
-          chunkIndex: i,
-          previousActualY: chunks[i - 1]!.y,
-          currentActualY: actualY,
-          requestedY,
-          controller: metrics.controllerType,
-        };
-        console.error("[ScreenX] duplicate scroll position in fullPage", JSON.stringify(duplicateInfo));
-        throw new CaptureError(
-          "CAPTURE_FAILED",
-          `Duplicate scroll position detected: chunk ${i + 1} at y=${actualY} did not advance past previous y=${chunks[i - 1]!.y}.`,
-          { cause: new Error(JSON.stringify(duplicateInfo)) }
-        );
-      }
-      // Removed redundant sleep: scrollToAndSettle already waits for rendering to stabilize
-      sendProgress(tab.id, {
-        mode: "full-page",
-        stage: "Capturing...",
-        percent: Math.round((completedChunks / totalChunks) * 100),
-        currentChunk: i + 1,
-        totalChunks,
-        currentY: actualY,
-      });
-
-      const tCaptureStart = performance.now();
-      const dataUrl = await withTimeout(
-        captureVisibleTabThrottled(
-          tab.windowId,
-          2,
-          async () => {
-            if (tab?.id) {
-              try {
-                await sendToContent<{ ok: true }>(tab.id, { type: "SCREENX_HIDE_PROGRESS" });
-              } catch {
-                // ignore
-              }
-            }
-          },
-          async () => {
-            if (tab?.id) {
-              try {
-                await sendToContent<{ ok: true }>(tab.id, { type: "SCREENX_SHOW_PROGRESS" });
-              } catch {
-                // ignore
-              }
-            }
-          }
-        ),
-        CAPTURE_TIMEOUT_MS,
-        `captureVisibleTab y=${actualY}`
-      );
-      perfCapture += performance.now() - tCaptureStart;
-
-      // Use actual scroll position for stitching, not requested
-      chunks.push({ dataUrl, x: actualX, y: actualY });
-
-      sendProgress(tab.id, {
-        mode: "full-page",
-        stage: "Processing...",
-        percent: Math.round((chunks.length / totalChunks) * 100),
-        currentChunk: i + 1,
-        totalChunks,
-        currentY: actualY,
-      });
-
-      console.debug(`[ScreenX] full-page chunk ${chunks.length}/${positions.length} y=${actualY} (requested ${requestedY}) captured ${Math.round(dataUrl.length / 1024)}KB`);
-    }
+    const chunks = loopResult.chunks;
+    perfScroll = loopResult.perfScroll;
+    perfCapture = loopResult.perfCapture;
 
     sendProgress(tab.id, {
       mode: "full-page",
