@@ -510,8 +510,8 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
         }
       }
     }
-    occludedTopHeight = Math.min(occludedTopHeight, viewportHeight * 0.4);
-    occludedBottomHeight = Math.min(occludedBottomHeight, viewportHeight * 0.4);
+    occludedTopHeight = Math.min(occludedTopHeight, viewportHeight * 0.25);
+    occludedBottomHeight = Math.min(occludedBottomHeight, viewportHeight * 0.25);
 
     if (metrics.controllerType && metrics.controllerType !== "window") {
       console.warn("[ScreenX][SelectedArea] nested controller detected", JSON.stringify(metrics));
@@ -520,7 +520,7 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     await withTimeout(sendToContent<{ ok: true }>(tab.id, { type: "SCREENX_PREPARE_CAPTURE" }), CONTENT_TIMEOUT_MS, "Prepare");
     prepared = true;
 
-    const positions = calculateRangePositions(startY, endY, viewportHeight, metrics.maxScrollY, 150, occludedTopHeight, occludedBottomHeight);
+    const positions = calculateRangePositions(startY, endY, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
 
     if (positions.length === 0) throw new CaptureError("CAPTURE_FAILED", "No positions to capture.");
 

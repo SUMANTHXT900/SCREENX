@@ -33,7 +33,7 @@ export interface StitchInput {
 const MAX_TOTAL_HEIGHT = 65000;
 const MAX_TOTAL_WIDTH = 10000;
 const MAX_CANVAS_PIXELS = 268_435_456;
-const MAX_CHUNKS = 150;
+const MAX_CHUNKS = 300;
 
 function assertLimits(input: StitchInput): void {
   if (input.chunks.length > MAX_CHUNKS) {

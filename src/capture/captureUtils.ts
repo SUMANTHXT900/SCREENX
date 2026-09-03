@@ -54,16 +54,25 @@ export function calculatePositions(
   totalHeight: number, 
   viewportHeight: number, 
   maxScrollY: number, 
-  maxPositions = 150,
+  maxPositions = 300,
   occludedTopHeight = 0,
   occludedBottomHeight = 0
 ): number[] {
   if (viewportHeight <= 0) throw new CaptureError("CAPTURE_FAILED", "Invalid viewport height.");
-  const step = Math.max(10, viewportHeight - occludedTopHeight - occludedBottomHeight);
+  let step = Math.max(10, viewportHeight - occludedTopHeight - occludedBottomHeight);
   
-  const required = Math.ceil(totalHeight / step);
+  let required = Math.ceil(totalHeight / step);
   if (required > maxPositions) {
-    throw new CaptureError("PAGE_TOO_LARGE", `Page requires ${required} viewports — exceeds ${maxPositions} limit. Try a shorter page or selected range.`);
+    // If step is small causing excessive viewports, adaptively increase step
+    // as long as step leaves at least 20px overlap between viewports
+    const maxSafeStep = Math.max(10, viewportHeight - 20);
+    const adaptiveStep = Math.ceil(totalHeight / maxPositions);
+    if (adaptiveStep <= maxSafeStep) {
+      step = adaptiveStep;
+      required = Math.ceil(totalHeight / step);
+    } else {
+      throw new CaptureError("PAGE_TOO_LARGE", `Page requires ${required} viewports — exceeds ${maxPositions} limit. Try a shorter page or selected range.`);
+    }
   }
 
   const positions: number[] = [];
@@ -91,7 +100,7 @@ export function calculateRangePositions(
   endY: number,
   viewportHeight: number,
   maxScrollY?: number,
-  maxPositions = 150,
+  maxPositions = 300,
   occludedTopHeight = 0,
   occludedBottomHeight = 0
 ): number[] {
@@ -101,16 +110,23 @@ export function calculateRangePositions(
   const rangeHeight = rangeBottom - rangeTop;
   if (rangeHeight <= 0) throw new CaptureError("INVALID_SELECTION", "Invalid selection height.");
 
-  const step = Math.max(10, viewportHeight - occludedTopHeight - occludedBottomHeight);
+  let step = Math.max(10, viewportHeight - occludedTopHeight - occludedBottomHeight);
 
   const clampedMaxScrollY =
     typeof maxScrollY === "number" && Number.isFinite(maxScrollY)
       ? Math.max(0, maxScrollY)
       : Number.MAX_SAFE_INTEGER;
 
-  const required = Math.ceil(rangeHeight / step) + 1;
+  let required = Math.ceil(rangeHeight / step) + 1;
   if (required > maxPositions) {
-    throw new CaptureError("PAGE_TOO_LARGE", `Selected range requires ${required} viewports — exceeds ${maxPositions} limit. Choose a smaller range.`);
+    const maxSafeStep = Math.max(10, viewportHeight - 20);
+    const adaptiveStep = Math.ceil(rangeHeight / (maxPositions - 1));
+    if (adaptiveStep <= maxSafeStep) {
+      step = adaptiveStep;
+      required = Math.ceil(rangeHeight / step) + 1;
+    } else {
+      throw new CaptureError("PAGE_TOO_LARGE", `Selected range requires ${required} viewports — exceeds ${maxPositions} limit. Choose a smaller range.`);
+    }
   }
 
   const positions: number[] = [];
@@ -145,6 +161,6 @@ export function calculateTotalTimeout(numChunks: number, stabilizeMs = 160, capt
   // Use conservative estimate: 3500 + 160 + 600 = 4260 per chunk
   const perChunk = 3500 + stabilizeMs + captureIntervalMs;
   const estimated = numChunks * perChunk + overheadMs;
-  // Clamp between 15s and 300s, scaling with chunks
-  return Math.max(15000, Math.min(300000, estimated + 5000));
+  // Clamp between 15s and 600s (10 min), scaling with chunks
+  return Math.max(15000, Math.min(600000, estimated + 5000));
 }

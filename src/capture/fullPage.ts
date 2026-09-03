@@ -189,6 +189,10 @@ export async function captureFullPage(): Promise<CaptureResult> {
     let occludedBottomHeight = 0;
     if (metrics.fixedElements) {
       for (const rect of metrics.fixedElements) {
+        // Only consider elements spanning at least 35% of viewport width
+        const elWidth = rect.right - rect.left;
+        if (elWidth < viewportWidth * 0.35) continue;
+
         if (rect.top <= 0 && rect.bottom > 0 && rect.bottom < viewportHeight / 2) {
           occludedTopHeight = Math.max(occludedTopHeight, rect.bottom);
         }
@@ -197,8 +201,9 @@ export async function captureFullPage(): Promise<CaptureResult> {
         }
       }
     }
-    occludedTopHeight = Math.min(occludedTopHeight, viewportHeight * 0.4);
-    occludedBottomHeight = Math.min(occludedBottomHeight, viewportHeight * 0.4);
+    // Limit occlusions so step is never starved
+    occludedTopHeight = Math.min(occludedTopHeight, viewportHeight * 0.25);
+    occludedBottomHeight = Math.min(occludedBottomHeight, viewportHeight * 0.25);
 
     // Check for nested scroll container that would make capture incorrect
     if (metrics.controllerType && metrics.controllerType !== "window") {
@@ -212,8 +217,12 @@ export async function captureFullPage(): Promise<CaptureResult> {
     );
     prepared = true;
 
-    // Calculate positions using shared helper
-    const positions = calculatePositions(totalHeight, viewportHeight, metrics.maxScrollY ?? totalHeight - viewportHeight, 150, occludedTopHeight, occludedBottomHeight);
+    // For ultra-tall or infinite-scroll pages, clamp capture height to browser canvas maximum (65,000 CSS px)
+    const effectiveTotalHeight = Math.min(totalHeight, 65000);
+    const effectiveMaxScrollY = Math.min(metrics.maxScrollY ?? totalHeight - viewportHeight, Math.max(0, effectiveTotalHeight - viewportHeight));
+
+    // Calculate positions using shared helper (allowing up to 300 viewports with adaptive stepping)
+    const positions = calculatePositions(effectiveTotalHeight, viewportHeight, effectiveMaxScrollY, 300, occludedTopHeight, occludedBottomHeight);
 
     if (positions.length === 0) {
       throw new CaptureError("CAPTURE_FAILED", "No scroll positions calculated.");
@@ -365,7 +374,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
     const stitchResult = await stitchImages({
       chunks,
       totalWidth,
-      totalHeight,
+      totalHeight: effectiveTotalHeight,
       viewportWidth,
       viewportHeight,
       dpr: dpr || 1,
@@ -420,7 +429,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
     console.debug("[ScreenX] full-page stitched", JSON.stringify({
       chunks: chunks.length,
       totalWidth,
-      totalHeight,
+      totalHeight: effectiveTotalHeight,
       viewportHeight,
       dpr,
       finalWidth: width,
@@ -430,6 +439,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
 
     if (tab?.id !== undefined) {
       try {
+        const isClamped = totalHeight > 65000;
         chrome.tabs.sendMessage(
           tab.id,
           {
@@ -437,7 +447,9 @@ export async function captureFullPage(): Promise<CaptureResult> {
             toast: {
               type: "success",
               title: "Capture Complete",
-              message: "Full page captured successfully.",
+              message: isClamped
+                ? "Full page captured (captured first 65,000px due to browser limits)."
+                : "Full page captured successfully.",
             },
           },
           () => {

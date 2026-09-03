@@ -1,4 +1,4 @@
-import { calculateRangePositions } from "../src/capture/captureUtils";
+import { calculateRangePositions, calculatePositions } from "../src/capture/captureUtils";
 import { test, expect, describe } from "vitest";
 
 describe("Planner tests", () => {
@@ -121,5 +121,27 @@ describe("Stitcher math tests", () => {
       }
     }
     expect(coveredDocY).toBe(endY);
+  });
+
+  test("Test 7: Adaptive step scaling prevents exceeding maxPositions on small-step scenarios", () => {
+    // Total height 50,000 with 150px step would normally require 334 viewports (> 150)
+    // Adaptive stepping must scale step up to fit within 300 positions without throwing
+    const positions = calculatePositions(50000, 800, 50000, 300, 320, 320);
+
+    expect(positions.length).toBeGreaterThan(0);
+    expect(positions.length).toBeLessThanOrEqual(300);
+    // Verify last position reaches near the end
+    expect(positions[positions.length - 1]! + 800).toBeGreaterThanOrEqual(50000);
+  });
+
+  test("Test 8: Full 65,000px capture plans within 300 viewports with valid overlaps", () => {
+    const positions = calculatePositions(65000, 900, 65000, 300, 50, 50);
+
+    expect(positions.length).toBeGreaterThan(50);
+    expect(positions.length).toBeLessThanOrEqual(300);
+    // Verify each chunk overlaps with the previous one
+    for (let i = 1; i < positions.length; i++) {
+      expect(positions[i]!).toBeLessThan(positions[i - 1]! + 900);
+    }
   });
 });
