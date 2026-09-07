@@ -1,409 +1,447 @@
-import { getSelectionDocumentY } from "../dom/scrollController.js";
-import { measurePage } from "../dom/occlusion.js";
+/**
+ * Selection manager — thin orchestrator for drag-rectangle region selection
+ * (plan: content/selection).
+ * State → SelectionStateMachine.ts · overlay → selectionOverlay.ts ·
+ * gestures → mouseTracker.ts.
+ *
+ * The box is viewport-relative; the range derives from live scroll readings
+ * (startScrollTop at draw end, endScrollTop at handle release), so layout
+ * shifts between gestures cannot corrupt it.
+ */
+import { findScrollContainerAt } from "../scroll/ScrollController.js";
+import { waitForStableScroll } from "../scroll/scrollSettler.js";
+import {
+  resetSelectionState,
+  selectionState,
+  type SelectionBox,
+} from "./SelectionStateMachine.js";
+import {
+  destroyOverlay,
+  getOverlay,
+  hideReviewBar,
+  mountOverlay,
+  moveReviewBar,
+  paintBox,
+  paintLabel,
+  peekThrough,
+  setGuides,
+  setHandleExhausted,
+  setHandlePulse,
+  setHandleVisible,
+  setOverlayBusy,
+  setOverlayHintError,
+  setOverlayStage,
+  showMiniHint,
+  showReviewBar,
+  type OverlayRefs,
+} from "./selectionOverlay.js";
+import { trackDrawDrag, trackExtendDrag } from "./mouseTracker.js";
+import { fullWidthBox, moveBox, resizeBoxBR } from "./boxMath.js";
+import { loadLastBoxRange, saveLastBoxRange } from "./lastBox.js";
 
-type SelectionModeState =
-  | "IDLE"
-  | "WAITING_FOR_START"
-  | "WAITING_FOR_END"
-  | "END_SET"
-  | "CAPTURING"
-  | "COMPLETED";
+/** Resolves once the draw-end scroll readings are settled (see acceptDrawnBox). */
+let resolvePending: Promise<void> | null = null;
 
-interface SelectionInternalState {
-  state: SelectionModeState;
-  startY: number | null;
-  endY: number | null;
-  previewLine: HTMLElement | null;
-  startLine: HTMLElement | null;
-  endLine: HTMLElement | null;
-  hud: HTMLElement | null;
-  captureButton: HTMLButtonElement | null;
-  changeEndButton: HTMLButtonElement | null;
-  cancelButton: HTMLButtonElement | null;
-  keyHandler: ((e: KeyboardEvent) => void) | null;
-  clickHandler: ((e: MouseEvent) => void) | null;
-  mouseMoveHandler: ((e: MouseEvent) => void) | null;
-  mouseEnterHandler: ((e: MouseEvent) => void) | null;
-  mouseLeaveHandler: ((e: MouseEvent) => void) | null;
-}
-
-const selectionState: SelectionInternalState = {
-  state: "IDLE",
-  startY: null,
-  endY: null,
-  previewLine: null,
-  startLine: null,
-  endLine: null,
-  hud: null,
-  captureButton: null,
-  changeEndButton: null,
-  cancelButton: null,
-  keyHandler: null,
-  clickHandler: null,
-  mouseMoveHandler: null,
-  mouseEnterHandler: null,
-  mouseLeaveHandler: null,
-};
-
-function detachPreviewListeners(): void {
-  const s = selectionState;
-  if (s.mouseMoveHandler) {
-    document.removeEventListener("mousemove", s.mouseMoveHandler, true);
-    s.mouseMoveHandler = null;
-  }
-  if (s.mouseEnterHandler) {
-    document.removeEventListener("mouseenter", s.mouseEnterHandler, true);
-    s.mouseEnterHandler = null;
-  }
-  if (s.mouseLeaveHandler) {
-    document.removeEventListener("mouseleave", s.mouseLeaveHandler, true);
-    s.mouseLeaveHandler = null;
-  }
-  if (s.previewLine) {
-    try {
-      s.previewLine.remove();
-    } catch {
-      // ignore
-    }
-    s.previewLine = null;
-  }
+function currentRefs(): OverlayRefs | null {
+  return getOverlay();
 }
 
 function removeSelectionUI(): void {
-  detachPreviewListeners();
-
-  const s = selectionState;
-  if (s.keyHandler) {
-    document.removeEventListener("keydown", s.keyHandler, true);
-    s.keyHandler = null;
+  const cancel = selectionState.gestureCancel;
+  selectionState.gestureCancel = null;
+  try {
+    cancel?.();
+  } catch {
+    // ignore
   }
-  if (s.clickHandler) {
-    document.removeEventListener("click", s.clickHandler, true);
-    s.clickHandler = null;
+  cancelExtends();
+  try {
+    dblCancel?.();
+  } catch {
+    // ignore
   }
-
-  if (s.startLine) {
-    try {
-      s.startLine.remove();
-    } catch {
-      // ignore
-    }
-    s.startLine = null;
+  dblCancel = null;
+  resolvePending = null;
+  if (selectionState.keyHandler) {
+    document.removeEventListener("keydown", selectionState.keyHandler, true);
+    selectionState.keyHandler = null;
   }
-  if (s.endLine) {
-    try {
-      s.endLine.remove();
-    } catch {
-      // ignore
-    }
-    s.endLine = null;
-  }
-  if (s.hud) {
-    try {
-      s.hud.remove();
-    } catch {
-      // ignore
-    }
-    s.hud = null;
-  }
-
-  s.captureButton = null;
-  s.changeEndButton = null;
-  s.cancelButton = null;
-  s.startY = null;
-  s.endY = null;
-  s.state = "IDLE";
+  hideReviewBar();
+  destroyOverlay();
+  resetSelectionState();
   document.documentElement.style.removeProperty("cursor");
 }
 
-function createHorizontalLine(y: number, label: string, color: string): HTMLElement {
-  const line = document.createElement("div");
-  line.style.cssText = `
-    position: absolute;
-    left: 0;
-    top: ${y}px;
-    width: 100%;
-    height: 0;
-    border-top: 2px dashed ${color};
-    z-index: 2147483646;
-    pointer-events: none;
-    box-shadow: 0 0 8px rgba(0,0,0,0.15);
-  `;
-  const labelEl = document.createElement("div");
-  labelEl.textContent = label;
-  labelEl.style.cssText = `
-    position: absolute;
-    left: 50%;
-    top: -14px;
-    transform: translateX(-50%);
-    background: ${color};
-    color: white;
-    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    padding: 2px 10px;
-    border-radius: 9999px;
-    white-space: nowrap;
-    box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-    pointer-events: none;
-  `;
-  line.appendChild(labelEl);
-  return line;
-}
+/** Cancels the extend trackers; the draw tracker stays armed for redraws. */
+let extendCancel: (() => void) | null = null;
+let extendTopCancel: (() => void) | null = null;
+let dblCancel: (() => void) | null = null;
 
-function createPreviewLine(labelContent: string, color: string): HTMLElement {
-  const line = document.createElement("div");
-  line.style.cssText = `
-    position: fixed;
-    left: 0;
-    top: -100px;
-    width: 100%;
-    height: 0;
-    border-top: 2px solid ${color};
-    z-index: 2147483646;
-    pointer-events: none;
-    display: none;
-  `;
-  const label = document.createElement("div");
-  label.textContent = labelContent;
-  label.style.cssText = `
-    position: absolute;
-    left: 50%;
-    top: -14px;
-    transform: translateX(-50%);
-    background: ${color};
-    color: white;
-    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 9999px;
-    white-space: nowrap;
-    pointer-events: none;
-  `;
-  line.appendChild(label);
-  return line;
-}
-
-function attachPreviewListeners(labelContent: string, color: string): void {
-  detachPreviewListeners();
-
-  const previewLine = createPreviewLine(labelContent, color);
-  (document.body || document.documentElement).appendChild(previewLine);
-  selectionState.previewLine = previewLine;
-
-  const mouseMoveHandler = (e: MouseEvent) => {
-    if (!selectionState.previewLine) return;
-    if (e.clientY < 0 || e.clientY > window.innerHeight || e.clientX < 0 || e.clientX > window.innerWidth) {
-      selectionState.previewLine.style.display = "none";
-      return;
+function cancelExtends(): void {
+  for (const cancel of [extendCancel, extendTopCancel]) {
+    try {
+      cancel?.();
+    } catch {
+      // ignore
     }
-    selectionState.previewLine.style.display = "block";
-    selectionState.previewLine.style.top = `${e.clientY}px`;
-  };
-
-  const mouseEnterHandler = (e: MouseEvent) => {
-    if (selectionState.previewLine) {
-      selectionState.previewLine.style.display = "block";
-      selectionState.previewLine.style.top = `${e.clientY}px`;
-    }
-  };
-
-  const mouseLeaveHandler = () => {
-    if (selectionState.previewLine) {
-      selectionState.previewLine.style.display = "none";
-    }
-  };
-
-  document.addEventListener("mousemove", mouseMoveHandler, true);
-  document.addEventListener("mouseenter", mouseEnterHandler, true);
-  document.addEventListener("mouseleave", mouseLeaveHandler, true);
-
-  selectionState.mouseMoveHandler = mouseMoveHandler;
-  selectionState.mouseEnterHandler = mouseEnterHandler;
-  selectionState.mouseLeaveHandler = mouseLeaveHandler;
-}
-
-function createHud(): HTMLDivElement {
-  const hud = document.createElement("div");
-  hud.id = "__screenx_selection_hud";
-  hud.style.cssText = `
-    position: fixed;
-    top: 20px;
-    left: 50%;
-    transform: translateX(-50%);
-    z-index: 2147483647;
-    background: #18181b;
-    color: #fafafa;
-    padding: 12px 16px;
-    border-radius: 12px;
-    box-shadow: 0 8px 30px rgba(0,0,0,0.2);
-    font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
-    font-size: 13px;
-    line-height: 1.4;
-    text-align: center;
-    max-width: 92vw;
-    pointer-events: auto;
-  `;
-  return hud;
-}
-
-function updateHudForStart(): void {
-  const hud = selectionState.hud;
-  if (!hud) return;
-  hud.innerHTML = `
-    <div style="font-weight:600; font-size:14px; display:flex; align-items:center; gap:8px; justify-content:center;">
-      <span style="width:8px;height:8px;border-radius:9999px;background:#22c55e;display:inline-block;"></span>
-      Selected Area — Horizontal Range
-    </div>
-    <div style="margin-top:6px; color:#a1a1aa;">
-      <b style="color:#fff;">Click</b> to set <span style="color:#22c55e; font-weight:600;">START</span> line
-    </div>
-    <div style="margin-top:6px; font-size:11px; color:#a1a1aa;">
-      Scroll freely, then <b style="color:#fff;">Click</b> for <span style="color:#ef4444; font-weight:600;">END</span> &nbsp;•&nbsp;
-      <b style="color:#fff; background:#27272a; padding:2px 6px; border-radius:6px;">Esc</b> to cancel
-    </div>
-  `;
-}
-
-function updateHudForEndPreview(): void {
-  const hud = selectionState.hud;
-  if (!hud || selectionState.startY === null) return;
-  hud.innerHTML = `
-    <div style="font-weight:600; font-size:14px; display:flex; align-items:center; gap:8px; justify-content:center;">
-      <span style="width:8px;height:8px;border-radius:9999px;background:#22c55e;display:inline-block;"></span>
-      START at ${Math.round(selectionState.startY)}px — Click to set END
-    </div>
-    <div style="margin-top:6px; color:#a1a1aa;">
-      Scroll freely, then <b style="color:#fff;">Click</b> for <span style="color:#ef4444; font-weight:600;">END</span>
-    </div>
-    <div style="margin-top:6px; font-size:11px; color:#a1a1aa;">
-      <b style="color:#fff; background:#27272a; padding:2px 6px; border-radius:6px;">Esc</b> to cancel
-    </div>
-  `;
-}
-
-function updateHudForReady(): void {
-  const hud = selectionState.hud;
-  if (!hud || selectionState.startY === null || selectionState.endY === null) return;
-  const sY = Math.min(selectionState.startY, selectionState.endY);
-  const eY = Math.max(selectionState.startY, selectionState.endY);
-  hud.innerHTML = `
-    <div style="font-weight:600; font-size:14px; display:flex; align-items:center; gap:8px; justify-content:center;">
-      <span style="width:8px;height:8px;border-radius:9999px;background:#22c55e;display:inline-block;"></span>
-      Range: ${Math.round(sY)}px → ${Math.round(eY)}px (${Math.round(Math.abs(eY - sY))}px)
-    </div>
-    <div style="margin-top:8px; display:flex; gap:8px; justify-content:center;">
-      <button id="__screenx_capture_btn" style="background:#22c55e; color:white; border:none; padding:8px 14px; border-radius:8px; font-weight:600; cursor:pointer;">Capture Selected Area</button>
-      <button id="__screenx_change_end_btn" style="background:#27272a; color:#fafafa; border:1px solid #3f3f46; padding:8px 12px; border-radius:8px; cursor:pointer;">Change END</button>
-      <button id="__screenx_cancel_btn" style="background:transparent; color:#a1a1aa; border:1px solid #3f3f46; padding:8px 12px; border-radius:8px; cursor:pointer;">Cancel</button>
-    </div>
-    <div style="margin-top:6px; font-size:11px; color:#a1a1aa;">
-      <b style="color:#fff; background:#27272a; padding:2px 6px; border-radius:6px;">Enter</b> to capture &nbsp;•&nbsp;
-      <b style="color:#fff; background:#27272a; padding:2px 6px; border-radius:6px;">Esc</b> to cancel
-    </div>
-  `;
-
-  const captureBtn = hud.querySelector("#__screenx_capture_btn") as HTMLButtonElement | null;
-  const changeBtn = hud.querySelector("#__screenx_change_end_btn") as HTMLButtonElement | null;
-  const cancelBtn = hud.querySelector("#__screenx_cancel_btn") as HTMLButtonElement | null;
-
-  selectionState.captureButton = captureBtn;
-  selectionState.changeEndButton = changeBtn;
-  selectionState.cancelButton = cancelBtn;
-
-  if (captureBtn) {
-    captureBtn.addEventListener("click", () => triggerCapture());
   }
-  if (changeBtn) {
-    changeBtn.addEventListener("click", () => {
-      if (selectionState.endLine) {
-        try {
-          selectionState.endLine.remove();
-        } catch {
-          // ignore
-        }
-        selectionState.endLine = null;
+  extendCancel = null;
+  extendTopCancel = null;
+}
+
+function paintCurrent(extra?: string): void {
+  const refs = currentRefs();
+  if (!refs) return;
+  paintBox(refs, selectionState.box);
+  paintLabel(refs, selectionState.box, extra);
+}
+
+async function resolveScrollTarget(): Promise<void> {
+  const box = selectionState.box;
+  if (!box) return;
+  const restore = peekThrough();
+  try {
+    selectionState.scrollTarget = findScrollContainerAt(
+      box.left + box.width / 2,
+      Math.min(box.top + box.height / 2, window.innerHeight - 1)
+    );
+  } catch {
+    selectionState.scrollTarget = null;
+  } finally {
+    restore();
+  }
+  // Never trust a mid-glide reading: the container often still drifts from
+  // the user's own wheel scroll when the draw ends. A stale startScrollTop
+  // shifts the ENTIRE captured range (same height, wrong place).
+  try {
+    const t = selectionState.scrollTarget;
+    if (t) await withTimeoutGuard(waitForStableScroll(t), 600);
+    selectionState.startScrollTop = t ? t.getScrollTop() : window.scrollY;
+    selectionState.endScrollTop = selectionState.startScrollTop;
+  } catch {
+    try {
+      const t = selectionState.scrollTarget;
+      selectionState.startScrollTop = t ? t.getScrollTop() : window.scrollY;
+      selectionState.endScrollTop = selectionState.startScrollTop;
+    } catch {
+      selectionState.startScrollTop = 0;
+      selectionState.endScrollTop = 0;
+    }
+  }
+}
+
+/** Await with a hard cap so a restless page can never hang selection. */
+function withTimeoutGuard(promise: Promise<void>, ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    promise.then(
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      () => {
+        clearTimeout(timer);
+        resolve();
       }
-      selectionState.endY = null;
-      selectionState.state = "WAITING_FOR_END";
-      attachPreviewListeners("click to set END", "rgba(239,68,68,0.9)");
-      updateHudForEndPreview();
-    });
-  }
-  if (cancelBtn) {
-    cancelBtn.addEventListener("click", () => cancelSelectionMode());
+    );
+  });
+}
+
+function scrollApi() {
+  return {
+    getTop: () => {
+      try {
+        return selectionState.scrollTarget?.getScrollTop() ?? window.scrollY;
+      } catch {
+        return window.scrollY;
+      }
+    },
+    setTop: (y: number) => {
+      try {
+        if (selectionState.scrollTarget) selectionState.scrollTarget.setScrollTop(y);
+        else window.scrollTo(0, y);
+      } catch {
+        // ignore — capture side verifies per strip
+      }
+    },
+    maxTop: () => {
+      try {
+        return selectionState.scrollTarget?.getMaxScrollY() ?? 0;
+      } catch {
+        return 0;
+      }
+    },
+    getLeft: () => {
+      try {
+        return selectionState.scrollTarget?.getScrollLeft() ?? window.scrollX;
+      } catch {
+        return window.scrollX;
+      }
+    },
+  };
+}
+
+function describeTarget(): string {
+  try {
+    return selectionState.scrollTarget?.describe() ?? "window";
+  } catch {
+    return "window";
   }
 }
 
-export function triggerCapture(): void {
+/** Handle released — the full range is known, so capture starts now (never mid-drag). */
+export async function triggerCapture(): Promise<void> {
   if (selectionState.state === "CAPTURING" || selectionState.state === "COMPLETED") return;
-  if (selectionState.startY === null || selectionState.endY === null || selectionState.state !== "END_SET") {
-    if (selectionState.hud) {
-      selectionState.hud.style.background = "#7f1d1d";
-      const msg = selectionState.startY === null ? "Click to set START first" : "Click to set END first";
-      selectionState.hud.innerHTML = `<div style="font-weight:600; color:#f87171;">${msg}</div>`;
-      setTimeout(() => {
-        if (selectionState.hud && selectionState.state !== "CAPTURING" && selectionState.state !== "COMPLETED") {
-          selectionState.hud.style.background = "#0a0a0a";
-          if (selectionState.startY === null) updateHudForStart();
-          else if (selectionState.endY === null) updateHudForEndPreview();
-          else updateHudForReady();
-        }
-      }, 900);
-    }
-    return;
-  }
+  const box0 = selectionState.box;
+  const refs0 = currentRefs();
+  if (!box0 || !refs0) return;
 
-  let sY = Math.min(selectionState.startY, selectionState.endY);
-  let eY = Math.max(selectionState.startY, selectionState.endY);
-  const { totalHeight, totalWidth, viewportWidth } = measurePage();
-  sY = Math.max(0, Math.min(sY, totalHeight - 1));
-  eY = Math.max(sY + 10, Math.min(eY, totalHeight));
-
-  if (eY - sY < 10) {
-    if (selectionState.hud) {
-      selectionState.hud.innerHTML = `<div style="font-weight:600; color:#f87171;">Range too small — choose further apart</div>`;
-      setTimeout(() => {
-        if (selectionState.hud && selectionState.state === "END_SET") {
-          selectionState.hud.style.background = "#0a0a0a";
-          updateHudForReady();
-        }
-      }, 800);
-    }
+  // Defensive clamp into the viewport; the drag logic already keeps it inside.
+  const clamped: SelectionBox = {
+    left: Math.max(0, Math.min(box0.left, window.innerWidth - 1)),
+    top: Math.max(0, Math.min(box0.top, window.innerHeight - 1)),
+    width: Math.max(1, Math.min(box0.width, window.innerWidth - Math.max(0, box0.left))),
+    height: Math.max(1, Math.min(box0.height, window.innerHeight - Math.max(0, box0.top))),
+  };
+  if (clamped.width < 12 || clamped.height < 12) {
+    setOverlayHintError(refs0, "Selection too small — drag a bigger box");
+    setTimeout(() => {
+      const r = currentRefs();
+      if (r && selectionState.state === "READY") setOverlayStage(r, 1, "That was just a click — drag a rectangle");
+    }, 1200);
     return;
   }
 
   selectionState.state = "CAPTURING";
+  hideReviewBar();
+  setHandlePulse(refs0, false);
+  setOverlayBusy(refs0, "Locking in selection…");
 
-  const width = Math.min(totalWidth, viewportWidth);
-  const selection = { x: 0, width, startY: sY, endY: eY };
+  // Wait for any in-flight draw-end resolve so readings are settled.
+  try {
+    await resolvePending;
+  } catch {
+    // ignore — readings fall back below
+  }
+  // The overlay may have been torn down while waiting (external cancel).
+  const refs = currentRefs();
+  const box = selectionState.box;
+  if (selectionState.state !== "CAPTURING" || !refs || !box) {
+    if (selectionState.state === "CAPTURING") selectionState.state = "IDLE";
+    return;
+  }
 
+  try {
+    // Settle-then-read, same as draw end: a container still gliding from
+    // extend auto-scroll (or a stray wheel tick) would otherwise anchor the
+    // range to a stale position.
+    const t = selectionState.scrollTarget;
+    if (t) await withTimeoutGuard(waitForStableScroll(t), 400);
+    selectionState.endScrollTop = scrollApi().getTop();
+  } catch {
+    // keep last reading
+  }
+  const api = scrollApi();
+  const selection = {
+    boxLeft: Math.round(clamped.left),
+    boxTop: Math.round(clamped.top),
+    boxWidth: Math.round(clamped.width),
+    boxHeight: Math.round(clamped.height),
+    startScrollTop: Math.round(selectionState.startScrollTop),
+    endScrollTop: Math.round(selectionState.endScrollTop),
+    // Document X: the loop pins horizontal scroll to 0 every strip, and the
+    // stitcher samples bitmap column (targetX − 0) showing container column
+    // (targetX − Rl); wanting release column (scrollLeft + boxLeft − Rl) gives
+    // targetX = boxLeft + scrollLeft. No rect term (see selectionRangeToTargets).
+    x: Math.round(clamped.left + api.getLeft()),
+    width: Math.round(clamped.width),
+  };
+
+  console.debug(
+    "[ScreenX] region selected",
+    JSON.stringify({ ...selection, scrollTarget: describeTarget() })
+  );
+
+  // Remember the horizontal span for next time (best-effort).
+  saveLastBoxRange(clamped.left, clamped.width);
+
+  selectionState.state = "CAPTURING";
   removeSelectionUI();
   selectionState.state = "COMPLETED";
 
   try {
     chrome.runtime.sendMessage({ type: "SCREENX_SELECTION_COMPLETE", selection });
   } catch (e) {
-    console.error("[ScreenX][SelectedArea] failed to send selection complete", e);
+    console.error("[ScreenX] failed to send selection complete", e);
   }
+}
+
+function armExtend(refs: OverlayRefs): void {
+  cancelExtends();
+  setHandleExhausted(refs, false);
+  const api = scrollApi();
+  const shared = {
+    onBox: (b: SelectionBox) => {
+      selectionState.box = b;
+      if (selectionState.state === "READY") selectionState.state = "EXTENDING";
+      setHandlePulse(refs, false);
+      paintCurrent();
+    },
+  };
+  extendCancel = trackExtendDrag(
+    refs,
+    selectionState.box ?? { left: 0, top: 0, width: 0, height: 0 },
+    api,
+    {
+      ...shared,
+      onScroll: (scrolled) => {
+        // Computed live: startScrollTop may still be resolving when armed early.
+        let total = 0;
+        try {
+          total =
+            Math.max(0, Math.round(api.maxTop() - selectionState.startScrollTop)) +
+            Math.round(selectionState.box?.height ?? 0);
+        } catch {
+          total = scrolled;
+        }
+        paintCurrent(`scrolled ${scrolled} / ${total} px`);
+      },
+      onExhausted: () => onExhausted(refs, api),
+      onDone: () => {
+        extendCancel = null;
+        setHandleExhausted(refs, false);
+        enterReview();
+      },
+    }
+  );
+  extendTopCancel = trackExtendDrag(
+    refs,
+    selectionState.box ?? { left: 0, top: 0, width: 0, height: 0 },
+    api,
+    {
+      ...shared,
+      onScroll: (scrolled) => {
+        paintCurrent(`scrolled ${scrolled} px`);
+      },
+      onExhausted: () => onExhausted(refs, api),
+      onDone: () => {
+        extendTopCancel = null;
+        setHandleExhausted(refs, false);
+        enterReview();
+      },
+    },
+    { upward: true }
+  );
+}
+
+function onExhausted(
+  refs: OverlayRefs,
+  api: { maxTop: () => number }
+): void {
+  // Genuine end of scrollable content (not an unscrollable page): say
+  // so instead of letting the user drag against a dead handle.
+  try {
+    if (api.maxTop() - selectionState.startScrollTop <= 0) return;
+  } catch {
+    return;
+  }
+  setHandleExhausted(refs, true);
+  paintCurrent("end reached — release to capture");
+}
+
+/** Review beat: explicit Capture / Adjust instead of instant fire on release. */
+function enterReview(): void {
+  if (selectionState.state !== "EXTENDING" && selectionState.state !== "READY") return;
+  selectionState.state = "REVIEW";
+  const refs = currentRefs();
+  const box = selectionState.box;
+  if (!refs || !box) {
+    selectionState.state = "IDLE";
+    return;
+  }
+  setHandlePulse(refs, false);
+  showMiniHint(refs, "Review — Enter ↵ to capture · drag to adjust");
+  showReviewBar(refs, box, {
+    onCapture: () => void triggerCapture(),
+    onAdjust: () => backToReady(),
+    onCancel: () => cancelSelectionMode(),
+  });
+  paintCurrent();
+}
+
+function backToReady(): void {
+  if (selectionState.state !== "REVIEW") return;
+  selectionState.state = "READY";
+  const refs = currentRefs();
+  hideReviewBar();
+  if (!refs || !selectionState.box) return;
+  setHandleExhausted(refs, false);
+  showMiniHint(refs, "Box set — drag a handle ↕ to extend · Enter ↵ to capture");
+  paintCurrent();
+  armExtend(refs);
+}
+
+async function acceptDrawnBox(refs: OverlayRefs, drawn: SelectionBox): Promise<void> {
+  selectionState.box = drawn;
+  selectionState.state = "READY";
+  hideReviewBar();
+  setHandleVisible(refs, true);
+  setHandlePulse(refs, true);
+  setHandleExhausted(refs, false);
+  setGuides(refs, null, null);
+  showMiniHint(refs, "Box set — drag the handle ↓ to extend · Enter ↵ to capture");
+  paintCurrent();
+  // Arm the handle immediately so it never feels dead; the scroll-target
+  // resolve below only fills in readings.
+  armExtend(refs);
+  resolvePending = (async () => {
+    await resolveScrollTarget();
+  })();
+  try {
+    await resolvePending;
+  } catch {
+    // ignore — readings fall back
+  }
+  // The user may have cancelled, redrawn, or fired capture during the wait —
+  // only the latest committed box may proceed.
+  if (currentRefs() !== refs) return;
+  if (selectionState.state !== "READY") return;
+  if (selectionState.box !== drawn) return;
+  try {
+    console.debug(
+      "[ScreenX] selection drawn",
+      JSON.stringify({
+        box: {
+          left: Math.round(drawn.left),
+          top: Math.round(drawn.top),
+          width: Math.round(drawn.width),
+          height: Math.round(drawn.height),
+        },
+        scrollTarget: describeTarget(),
+        startScrollTop: Math.round(selectionState.startScrollTop),
+      })
+    );
+  } catch {
+    // ignore
+  }
+  // Intentionally NOT re-armed: armExtend() already ran synchronously above,
+  // and its scrollApi()/onScroll getters read selectionState live, so the
+  // resolved container is already visible to the existing trackers.
+  // Re-arming here calls cancelExtends() → finish(), which detaches the live
+  // mousemove/mouseup listeners of a drag the user started during the
+  // resolveScrollTarget() await above — silently killing the gesture
+  // (mouse still down, no handlers attached, mousedown won't refire until
+  // release + re-click). The guards above already return early whenever the
+  // user interacted, so a re-arm could only ever fire when nothing changed.
 }
 
 export function enterSelectionMode(): void {
   if (selectionState.state !== "IDLE") removeSelectionUI();
-  selectionState.state = "WAITING_FOR_START";
-  selectionState.startY = null;
-  selectionState.endY = null;
+  selectionState.state = "DRAWING";
 
-  const hud = createHud();
-  document.documentElement.appendChild(hud);
-  selectionState.hud = hud;
-  updateHudForStart();
-
+  const refs = mountOverlay(() => cancelSelectionMode());
+  setOverlayStage(refs, 1, "Drag a rectangle over the area to capture");
   document.documentElement.style.cursor = "crosshair";
-
-  attachPreviewListeners("click to set START", "rgba(34,197,94,0.9)");
 
   const keyHandler = (e: KeyboardEvent) => {
     if (selectionState.state === "IDLE" || selectionState.state === "CAPTURING" || selectionState.state === "COMPLETED") return;
@@ -411,58 +449,120 @@ export function enterSelectionMode(): void {
       e.preventDefault();
       e.stopPropagation();
       cancelSelectionMode();
-    } else if (e.key === "Enter" || e.key === "End") {
-      if (selectionState.state === "END_SET") {
+      return;
+    }
+    // Enter commits without extending: READY captures the drawn box as-is,
+    // REVIEW confirms the reviewed box.
+    if (e.key === "Enter") {
+      if (selectionState.state === "READY" || selectionState.state === "REVIEW") {
         e.preventDefault();
         e.stopPropagation();
-        triggerCapture();
+        void triggerCapture();
       }
+      return;
+    }
+    // Arrow keys nudge the box (Shift = 10px); with Alt they resize the
+    // bottom-right corner instead. Only when a box exists to adjust.
+    if (
+      (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") &&
+      (selectionState.state === "READY" || selectionState.state === "REVIEW")
+    ) {
+      const box = selectionState.box;
+      const refs = currentRefs();
+      if (!box || !refs) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const step = e.shiftKey ? 10 : 1;
+      const dx = e.key === "ArrowLeft" ? -step : e.key === "ArrowRight" ? step : 0;
+      const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      selectionState.box = e.altKey ? resizeBoxBR(box, dx, dy, vw, vh) : moveBox(box, dx, dy, vw, vh);
+      paintCurrent();
+      moveReviewBar(refs, selectionState.box);
+      return;
+    }
+    // W reuses the last capture's horizontal span (best-effort memory).
+    if ((e.key === "w" || e.key === "W") && selectionState.state === "DRAWING" && !selectionState.box) {
+      const refs = currentRefs();
+      if (!refs) return;
+      e.preventDefault();
+      void loadLastBoxRange().then((saved) => {
+        const r = currentRefs();
+        if (!saved || !r || selectionState.state !== "DRAWING" || selectionState.box) return;
+        const width = Math.max(12, Math.min(saved.width, window.innerWidth));
+        const left = Math.max(0, Math.min(saved.left, window.innerWidth - width));
+        const height = Math.round(window.innerHeight * 0.4);
+        void acceptDrawnBox(r, {
+          left,
+          top: Math.round((window.innerHeight - height) / 2),
+          width,
+          height,
+        });
+      });
     }
   };
   document.addEventListener("keydown", keyHandler, true);
   selectionState.keyHandler = keyHandler;
 
-  const clickHandler = (e: MouseEvent) => {
-    if (selectionState.state === "IDLE" || selectionState.state === "CAPTURING" || selectionState.state === "COMPLETED") return;
-    if (selectionState.hud && selectionState.hud.contains(e.target as Node)) return;
-
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.stopImmediatePropagation) e.stopImmediatePropagation();
-
-    const docY = getSelectionDocumentY(e);
-
-    if (selectionState.state === "WAITING_FOR_START") {
-      selectionState.state = "WAITING_FOR_END";
-      selectionState.startY = docY;
-
-      const startLine = createHorizontalLine(docY, "START", "#22c55e");
-      (document.body || document.documentElement).appendChild(startLine);
-      selectionState.startLine = startLine;
-
-      attachPreviewListeners("click to set END", "rgba(239,68,68,0.9)");
-      updateHudForEndPreview();
-    } else if (selectionState.state === "WAITING_FOR_END") {
-      selectionState.state = "END_SET";
-      selectionState.endY = docY;
-
-      const endLine = createHorizontalLine(docY, "END", "#ef4444");
-      (document.body || document.documentElement).appendChild(endLine);
-      selectionState.endLine = endLine;
-
-      detachPreviewListeners();
-      updateHudForReady();
-    } else if (selectionState.state === "END_SET") {
-      const newEndY = docY;
-      selectionState.endY = newEndY;
-      if (selectionState.endLine) {
-        selectionState.endLine.style.top = `${newEndY}px`;
+  const drawCancel = trackDrawDrag(refs, {
+    onBox: (b) => {
+      // Live redraw preview; committed on release.
+      if (selectionState.state !== "DRAWING" && selectionState.state !== "READY") return;
+      selectionState.box = b;
+      paintCurrent();
+    },
+    onCursor: (x, y) => {
+      if (selectionState.state !== "DRAWING") return;
+      setGuides(refs, x, y);
+    },
+    onDone: (drawn) => {
+      // A fresh drag while READY means redraw: drop the old extend tracker.
+      if (selectionState.state !== "DRAWING" && selectionState.state !== "READY") return;
+      setGuides(refs, null, null);
+      if (!drawn) {
+        if (selectionState.state === "DRAWING") {
+          selectionState.box = null;
+          paintCurrent();
+          const r = currentRefs();
+          if (r) setOverlayStage(r, 1, "That was just a click — drag a rectangle");
+        }
+        return;
       }
-      updateHudForReady();
-    }
+      void acceptDrawnBox(refs, drawn);
+    },
+  });
+  selectionState.gestureCancel = drawCancel;
+
+  // Double-click snaps to full content width (keeps the vertical span).
+  const onDblClick = () => {
+    snapFullWidth();
   };
-  document.addEventListener("click", clickHandler, true);
-  selectionState.clickHandler = clickHandler;
+  refs.dim.addEventListener("dblclick", onDblClick);
+  dblCancel = () => refs.dim.removeEventListener("dblclick", onDblClick);
+
+  // Advertise width memory while the user is still drawing.
+  void loadLastBoxRange().then((saved) => {
+    const r = currentRefs();
+    if (saved && r && selectionState.state === "DRAWING" && !selectionState.box) {
+      setOverlayStage(r, 1, `Drag a rectangle · W for last width (${Math.round(saved.width)}px) · double-click for full width`);
+    }
+  });
+}
+
+/** Snap the current (or full-viewport) box to full content width. */
+function snapFullWidth(): void {
+  if (selectionState.state !== "DRAWING" && selectionState.state !== "READY") return;
+  const refs = currentRefs();
+  if (!refs) return;
+  const base = selectionState.box ?? {
+    left: 0,
+    top: 0,
+    width: window.innerWidth,
+    height: window.innerHeight,
+  };
+  setGuides(refs, null, null);
+  void acceptDrawnBox(refs, fullWidthBox(base, window.innerWidth));
 }
 
 export function cancelSelectionMode(): void {
@@ -472,4 +572,14 @@ export function cancelSelectionMode(): void {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Silent teardown: removes the overlay WITHOUT messaging the worker. Used
+ * when a newer trigger supersedes this run — the fresh START_SELECTION
+ * replaces the UI, and a SELECTION_CANCEL reply could land in the NEW
+ * waiter's listener and abort it instantly.
+ */
+export function dismissSelectionMode(): void {
+  removeSelectionUI();
 }

@@ -1,19 +1,28 @@
-import { CaptureError, type CaptureResult, type ProgressPayload } from "@/types";
-import { storePendingCapture } from "@/storage/captureHandoff";
-import { calculateRangePositions, calculateTotalTimeout, withTimeout } from "./captureUtils";
-import { ensureContentScript } from "./ensureContent";
+import { CaptureError, type CaptureResult } from "@/types";
+import type { MeasureResponse, RangeSelection, RegionSelection } from "@/messaging/events";
+import { isRestrictedUrl, queryActiveTab, withTimeout } from "./captureUtils";
+import { calculateTotalTimeout } from "./planner/adaptiveStep";
+import { planRangePositions, selectionRangeToTargets } from "./planner/rangePlan";
+import { computeRangeOcclusion } from "./planner/occlusion";
+import { HUD_RESERVE_PX } from "./stitch/limits";
+import { planSegments } from "./planner/segments";
+import { ensureContentScript } from "./client/ensureContent";
+import { sendProgress, sendToContent } from "./client/contentBridge";
 import { executeCaptureLoop } from "./engine/captureLoop";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-export interface RangeSelection {
-  x: number;
-  width: number;
-  startY: number;
-  endY: number;
-}
+import { globalSession } from "./engine/CaptureSession";
+import { acquireGlobalLock, heartbeatGlobalLock, releaseGlobalLock } from "./engine/globalLock";
+import {
+  clearPendingSelection,
+  registerPendingSelection,
+  takePendingSelection,
+  type PendingSelection,
+} from "./selectionPending";
+import {
+  finalizeCapture,
+  notifyFailure,
+  persistCapture,
+  toCaptureError,
+} from "./engine/finalize";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -24,107 +33,51 @@ const SCROLL_STABILIZE_MS = 160;
 const SELECTION_TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
-// Concurrency
-// ---------------------------------------------------------------------------
-
-let selectedAreaLock = false;
-
-function acquireLock(): void {
-  if (selectedAreaLock) {
-    throw new CaptureError("CAPTURE_FAILED", "A capture is already in progress. Please wait.");
-  }
-  selectedAreaLock = true;
-}
-
-function releaseLock(): void {
-  selectedAreaLock = false;
-}
-
-// ---------------------------------------------------------------------------
-// Helpers: tab + capture (shared via captureUtils)
-// ---------------------------------------------------------------------------
-
-import { isRestrictedUrl, queryActiveTab } from "./captureUtils";
-
-function sendToContent<T>(tabId: number, message: unknown, timeoutMs = CONTENT_TIMEOUT_MS): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      reject(new CaptureError("TIMEOUT", `Content script did not respond to ${(message as { type?: string })?.type} within ${timeoutMs}ms. Try reloading the page.`));
-    }, timeoutMs);
-    try {
-      chrome.tabs.sendMessage(tabId, message, (response) => {
-        if (timedOut) return;
-        clearTimeout(timer);
-        const err = chrome.runtime.lastError;
-        if (err) {
-          const msg = err.message ?? "Unknown messaging error";
-          if (/Receiving end does not exist/i.test(msg)) {
-            reject(new CaptureError("CONTENT_SCRIPT_NOT_READY", "Content script not ready. Please reload the page and try again.", { cause: err }));
-          } else {
-            reject(new CaptureError("CAPTURE_FAILED", msg, { cause: err }));
-          }
-          return;
-        }
-        if (response && typeof response === "object" && "error" in response) {
-          const msg = (response as { error: string }).error;
-          if (/SCROLL_POSITION_MISMATCH/i.test(msg)) {
-            reject(new CaptureError("CAPTURE_FAILED", msg));
-          } else {
-            reject(new CaptureError("CAPTURE_FAILED", msg));
-          }
-          return;
-        }
-        resolve(response as T);
-      });
-    } catch (e) {
-      clearTimeout(timer);
-      const msg = e instanceof Error ? e.message : String(e);
-      reject(new CaptureError("CAPTURE_FAILED", msg, { cause: e as Error }));
-    }
-  });
-}
-
-function sendProgress(tabId: number, progress: ProgressPayload): void {
-  try {
-    chrome.tabs.sendMessage(tabId, { type: "SCREENX_PROGRESS", progress }, () => {
-      void chrome.runtime.lastError;
-    });
-  } catch {
-    // ignore
-  }
-  if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
-    try {
-      chrome.runtime.sendMessage({ type: "SCREENX_PROGRESS", progress }).catch(() => {});
-    } catch {
-      // ignore
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Selection via content script
 // ---------------------------------------------------------------------------
 
-function waitForSelection(tabId: number): Promise<RangeSelection> {
-  return new Promise<RangeSelection>((resolve, reject) => {
+function waitForSelection(tabId: number): Promise<RegionSelection> {
+  return new Promise<RegionSelection>((resolve, reject) => {
     // eslint-disable-next-line prefer-const
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+    const record: PendingSelection = {
+      tabId,
+      onSuperseded: () => {
+        settle();
+        reject(new CaptureError("USER_CANCELLED", "Selection superseded by a newer capture request."));
+      },
+    };
 
     const handler = (message: unknown, sender: chrome.runtime.MessageSender) => {
       if (sender.tab?.id !== tabId) return false as unknown as void;
 
-      const msg = message as { type?: string; selection?: RangeSelection };
+      const msg = message as { type?: string; selection?: RegionSelection };
       if (msg.type === "SCREENX_SELECTION_COMPLETE") {
-        cleanup();
+        settle();
         if (!msg.selection) {
           reject(new CaptureError("CAPTURE_FAILED", "Selection completed but no data received."));
           return true;
         }
-        // Validate selection
         const sel = msg.selection;
-        if (typeof sel.startY !== "number" || typeof sel.endY !== "number" || typeof sel.x !== "number" || typeof sel.width !== "number") {
+        if (
+          typeof sel.boxLeft !== "number" ||
+          typeof sel.boxTop !== "number" ||
+          typeof sel.boxWidth !== "number" ||
+          typeof sel.boxHeight !== "number" ||
+          typeof sel.startScrollTop !== "number" ||
+          typeof sel.endScrollTop !== "number" ||
+          typeof sel.x !== "number" ||
+          typeof sel.width !== "number" ||
+          !Number.isFinite(sel.boxLeft) ||
+          !Number.isFinite(sel.boxTop) ||
+          !Number.isFinite(sel.boxWidth) ||
+          !Number.isFinite(sel.boxHeight) ||
+          !Number.isFinite(sel.startScrollTop) ||
+          !Number.isFinite(sel.endScrollTop) ||
+          !Number.isFinite(sel.x) ||
+          !Number.isFinite(sel.width)
+        ) {
           reject(new CaptureError("INVALID_SELECTION", "Invalid selection data."));
           return true;
         }
@@ -132,7 +85,7 @@ function waitForSelection(tabId: number): Promise<RangeSelection> {
         return true;
       }
       if (msg.type === "SCREENX_SELECTION_CANCEL") {
-        cleanup();
+        settle();
         reject(new CaptureError("USER_CANCELLED", "Selection cancelled by user."));
         return true;
       }
@@ -148,10 +101,28 @@ function waitForSelection(tabId: number): Promise<RangeSelection> {
       }
     };
 
+    /** Settle once: drop the listener AND unregister (complete/cancel/timeout/supersede). */
+    const settle = () => {
+      cleanup();
+      clearPendingSelection(record);
+    };
+
     chrome.runtime.onMessage.addListener(handler as unknown as (m: unknown, s: chrome.runtime.MessageSender, r: (x: unknown) => void) => boolean | void);
 
+    // Register synchronously (no await before this): a same-tick second
+    // trigger supersedes us immediately instead of both waits surviving.
+    const prev = registerPendingSelection(record);
+    if (prev) {
+      console.debug("[ScreenX][SelectedArea] superseding a stale selection wait");
+      try {
+        prev.onSuperseded();
+      } catch {
+        // ignore
+      }
+    }
+
     timeoutId = setTimeout(() => {
-      cleanup();
+      settle();
       try {
         chrome.tabs.sendMessage(tabId, { type: "SCREENX_CANCEL_SELECTION" }, () => {
           void chrome.runtime.lastError;
@@ -159,49 +130,83 @@ function waitForSelection(tabId: number): Promise<RangeSelection> {
       } catch {
         // ignore
       }
-      reject(new CaptureError("TIMEOUT", "Selection timed out. Please try again and press End when ready."));
+      reject(new CaptureError("TIMEOUT", "Selection timed out. Please try again."));
     }, SELECTION_TIMEOUT_MS);
 
-    chrome.tabs.sendMessage(tabId, { type: "SCREENX_START_SELECTION" }, () => {
+    chrome.tabs.sendMessage(tabId, { type: "SCREENX_START_SELECTION" }, (res) => {
       const err = chrome.runtime.lastError;
       if (err) {
-        cleanup();
+        settle();
         const msg = err.message ?? "Unknown error";
         if (/Receiving end does not exist/i.test(msg)) {
           reject(new CaptureError("CONTENT_SCRIPT_NOT_READY", "Content script not ready. Please reload the page and try again.", { cause: err }));
         } else {
           reject(new CaptureError("CAPTURE_FAILED", msg, { cause: err }));
         }
+        return;
       }
+      // Render acknowledgment: transport success only means the message
+      // arrived — the overlay must ALSO have mounted. A stale content script
+      // (extension updated, tab not reloaded) answers {ok:true} with no
+      // render flag; anything but rendered:true is a loud, actionable error
+      // instead of a 120s silent hang with no selection UI.
+      const ack = res as { ok?: boolean; rendered?: boolean; error?: string } | undefined;
+      if (!ack || ack.ok !== true || ack.rendered !== true) {
+        settle();
+        console.debug("[ScreenX][SelectedArea] selection UI did not confirm render:", JSON.stringify(ack ?? null));
+        reject(
+          new CaptureError(
+            "CONTENT_SCRIPT_NOT_READY",
+            ack?.error ?? "Selection UI didn't open on this page. Reload the tab and try again."
+          )
+        );
+      }
+      // else: overlay is up — keep waiting for COMPLETE / CANCEL / timeout.
     });
   });
 }
 
-// ---------------------------------------------------------------------------
-// Targeted stitch for selected range
-// ---------------------------------------------------------------------------
-
-interface StitchChunk {
-  dataUrl: string;
-  x: number;
-  y: number;
+/**
+ * Cancel a pending selection wait from OUTSIDE the engine (a newer trigger in
+ * handleCapture). Rejects the stale waiter so its run unwinds quietly, and
+ * tells the tab to tear the overlay down — silently (DISMISS, not CANCEL, so
+ * no SELECTION_CANCEL message can land in a fresh waiter's listener).
+ */
+export function cancelPendingSelection(): void {
+  const pending = takePendingSelection();
+  if (!pending) return;
+  console.debug("[ScreenX][SelectedArea] cancelling pending selection for a newer trigger");
+  try {
+    pending.onSuperseded();
+  } catch {
+    // ignore
+  }
+  try {
+    if (typeof chrome !== "undefined" && chrome.tabs?.sendMessage) {
+      chrome.tabs.sendMessage(pending.tabId, { type: "SCREENX_DISMISS_SELECTION" }, () => {
+        void chrome.runtime?.lastError;
+      });
+    }
+  } catch {
+    // ignore — overlay teardown is best-effort; a fresh START resets it anyway
+  }
 }
 
-export interface StitchOutput {
-  blob: Blob;
-  width: number;
-  height: number;
-  dataUrl: string;
-}
+// ---------------------------------------------------------------------------
+// Targeted stitch for selected range (thin wrapper over CanvasStitcher)
+// ---------------------------------------------------------------------------
 
-import { CanvasStitcher } from "./stitch/canvasStitcher";
+import type { StitchChunk, StitchOutput } from "./stitch/canvasStitcher";
+import { createStitcher } from "./stitch/canvasStitcher";
+
+export type { StitchChunk, StitchOutput };
 
 export async function stitchSelectedRange(
   chunks: StitchChunk[],
   selection: RangeSelection,
   metrics: { viewportWidth: number; viewportHeight: number; dpr: number; occludedTopHeight?: number; occludedBottomHeight?: number }
 ): Promise<StitchOutput> {
-  const stitcher = new CanvasStitcher({
+  const stitcher = createStitcher({
     chunks,
     selection,
     viewportWidth: metrics.viewportWidth,
@@ -219,9 +224,12 @@ export async function stitchSelectedRange(
 // ---------------------------------------------------------------------------
 
 export async function captureSelectedArea(): Promise<CaptureResult> {
-  acquireLock();
   let tab: chrome.tabs.Tab | null = null;
   let prepared = false;
+  let lockToken: string | null = null;
+  // Ownership flag: the selection wait below holds NO locks, so a superseded
+  // run unwinds through finally without touching a successor's locks.
+  let sessionHeld = false;
 
   try {
     tab = await queryActiveTab();
@@ -232,26 +240,72 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
 
     await ensureContentScript(tab);
 
+    // NO locks held here: selection is pure tab UI and unbounded (the user
+    // may take up to 120s to drag). Holding the capture lock across it is
+    // what produced the phantom CAPTURE_IN_PROGRESS on any re-trigger —
+    // a newer trigger supersedes this wait via the pending registry instead.
     const selection = await waitForSelection(tab.id);
+
+    // Locks from here on: the bounded, interleaving-unsafe capture phase.
+    globalSession.acquire();
+    sessionHeld = true;
+    lockToken = await acquireGlobalLock("selected-area", tab.id);
+
+    // Pin the scroll target to the container behind the selection box center
+    // BEFORE measuring: selection and capture must scroll the same element,
+    // otherwise the range maps onto the wrong scroller (nested pages).
+    // Best-effort — failure falls back to the prepare-time guess.
+    try {
+      await sendToContent<{ ok: boolean }>(
+        tab.id,
+        {
+          type: "SCREENX_RESOLVE_CONTAINER",
+          x: selection.boxLeft + selection.boxWidth / 2,
+          y: selection.boxTop + selection.boxHeight / 2,
+        },
+        CONTENT_TIMEOUT_MS
+      );
+    } catch {
+      // ignore — prepareCapture resolves on its own
+    }
+
     const t0 = performance.now();
     let perfScroll = 0;
     let perfCapture = 0;
     let perfStitch = 0;
 
-    const startY = Math.min(selection.startY, selection.endY);
-    const endY = Math.max(selection.startY, selection.endY);
+    // Range targets share the stitcher's frame (scroll + viewport offsets —
+    // see selectionRangeToTargets): no container-rect correction here.
+    const converted = selectionRangeToTargets(
+      selection.boxTop,
+      selection.boxHeight,
+      selection.startScrollTop,
+      selection.endScrollTop
+    );
+    const startY = Math.max(0, converted.startY);
+    const endY = converted.endY;
     let x = selection.x;
     let width = selection.width;
+
+    // NOTE: no post-release scroll adjustment is applied. Scroll coordinates
+    // are absolute and the loop re-scrolls to absolute positions, so any
+    // movement between release and capture is inherently irrelevant — the
+    // only readings that matter are the settle-then-read values in the
+    // payload. (A drift-chasing re-anchor here double-counts and shifts the
+    // range; virtualized lists even compensate scrollTop to keep the view
+    // stable, which would turn into pure error.)
 
     if (width <= 0 || endY - startY <= 0) {
       throw new CaptureError("INVALID_SELECTION", "Invalid selection. Please try again.");
     }
 
     if (width < 10) throw new CaptureError("INVALID_SELECTION", "Selection too narrow.");
-    if (endY - startY < 10) throw new CaptureError("INVALID_SELECTION", "Selection too short. Scroll further before pressing End.");
-    if (width > 10000 || endY - startY > 65000) {
-      throw new CaptureError("PAGE_TOO_LARGE", "Selected range exceeds 65,000px limit. Try a smaller region.");
+    if (endY - startY < 10) throw new CaptureError("INVALID_SELECTION", "Selection too short. Drag a taller box.");
+    if (width > 10000) {
+      throw new CaptureError("PAGE_TOO_LARGE", "Selected area is too wide. Zoom out or pick a narrower region.");
     }
+    // NOTE: over-tall ranges no longer throw here — they auto-split into
+    // canvas-safe parts below (planSegments throws only past the part cap).
 
     if (x < 0) {
       width += x;
@@ -269,7 +323,7 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     }));
 
     const metrics = await withTimeout(
-      sendToContent<{ viewportWidth: number; viewportHeight: number; dpr: number; maxScrollY: number; totalHeight: number; totalWidth: number; controllerType?: string; fixedElements?: { top: number; bottom: number; left: number; right: number }[] }>(
+      sendToContent<MeasureResponse>(
         tab.id,
         { type: "SCREENX_MEASURE_PAGE" }
       ),
@@ -277,30 +331,40 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       "Measure for selected area"
     );
 
-    const viewportWidth = metrics.viewportWidth;
-    const viewportHeight = metrics.viewportHeight;
     const dpr = metrics.dpr || 1;
-    
-    let occludedTopHeight = 0;
-    let occludedBottomHeight = 0;
-    if (metrics.fixedElements) {
-      const selLeft = normalizedSelection.x;
-      const selRight = normalizedSelection.x + normalizedSelection.width;
-      
-      for (const rect of metrics.fixedElements) {
-        // Horizontally disjoint elements do not occlude the capture region
-        if (rect.right <= selLeft || rect.left >= selRight) continue;
-        
-        if (rect.top <= 0 && rect.bottom > 0 && rect.bottom < viewportHeight / 2) {
-          occludedTopHeight = Math.max(occludedTopHeight, rect.bottom);
-        }
-        if (rect.bottom >= viewportHeight && rect.top > viewportHeight / 2 && rect.top < viewportHeight) {
-          occludedBottomHeight = Math.max(occludedBottomHeight, viewportHeight - rect.top);
-        }
-      }
+    // Bitmap frame is ALWAYS the window viewport (captureVisibleTab photographs
+    // the whole tab): planning steps, occlusion bands, and stitch scale must
+    // use window dims, never the (possibly narrower/shorter) scroll-container
+    // dims — otherwise every strip mis-scales on nested pages. The `??`
+    // fallbacks tolerate stale pre-update content scripts.
+    const viewportWidth = metrics.winViewportWidth ?? metrics.viewportWidth;
+    const viewportHeight = metrics.winViewportHeight ?? metrics.viewportHeight;
+
+    // Stale-coordinate guard: the page may have shifted between the user's
+    // clicks and this measurement (lazy content, virtualized lists). A range
+    // far outside the measured document means the coordinates no longer map
+    // to what the user saw — reselect instead of capturing garbage.
+    const margin = viewportHeight * 2;
+    if (
+      Number.isFinite(metrics.totalHeight) &&
+      (startY < -margin || endY > metrics.totalHeight + margin)
+    ) {
+      throw new CaptureError(
+        "INVALID_SELECTION",
+        "The page shifted while you were selecting (lazy-loaded content moved things around). Please reselect the range and try again."
+      );
     }
-    occludedTopHeight = Math.min(occludedTopHeight, viewportHeight * 0.25);
-    occludedBottomHeight = Math.min(occludedBottomHeight, viewportHeight * 0.25);
+
+    const occlusion = computeRangeOcclusion(
+      metrics.fixedElements,
+      viewportHeight,
+      normalizedSelection.x,
+      normalizedSelection.x + normalizedSelection.width
+    );
+    // Constant-HUD contract: see fullPage.ts — surviving trim is whichever is
+    // larger (real bars or the always-visible HUD).
+    const occludedTopHeight = Math.max(occlusion.top, HUD_RESERVE_PX);
+    const occludedBottomHeight = occlusion.bottom;
 
     if (metrics.controllerType && metrics.controllerType !== "window") {
       console.warn("[ScreenX][SelectedArea] nested controller detected", JSON.stringify(metrics));
@@ -309,7 +373,11 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     await withTimeout(sendToContent<{ ok: true }>(tab.id, { type: "SCREENX_PREPARE_CAPTURE" }), CONTENT_TIMEOUT_MS, "Prepare");
     prepared = true;
 
-    const positions = calculateRangePositions(startY, endY, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
+    // NOTE: nothing on the page is hidden or modified for capture (beyond the
+    // animation-freeze stylesheet). Fixed/sticky bars are handled purely by
+    // occlusion-aware overlap in the planner + stitcher.
+
+    const positions = planRangePositions(startY, endY, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
 
     if (positions.length === 0) throw new CaptureError("CAPTURE_FAILED", "No positions to capture.");
 
@@ -342,7 +410,7 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
 
     const totalTimeout = calculateTotalTimeout(positions.length, SCROLL_STABILIZE_MS, 600, 2000);
 
-    const chunks = [];
+    const chunks: StitchChunk[] = [];
     const perfPlanning = performance.now() - t0;
 
     const loopResult = await executeCaptureLoop({
@@ -352,6 +420,10 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       positions,
       totalTimeout,
       controllerType: metrics.controllerType,
+      // Liveness heartbeat — see fullPage.ts (same contract).
+      onChunk: () => {
+        if (lockToken) void heartbeatGlobalLock(lockToken);
+      },
     });
 
     chunks.push(...loopResult.chunks);
@@ -367,31 +439,58 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     });
 
     const tStitchStart = performance.now();
-    const stitchResult = await stitchSelectedRange(chunks, normalizedSelection, { viewportWidth, viewportHeight, dpr });
+    // Over-tall ranges auto-split into canvas-safe parts stitched from the same chunks.
+    const segments = planSegments(normalizedSelection.width, startY, endY, dpr);
+    const groupId = segments.length > 1 ? crypto.randomUUID() : undefined;
+
+    const parts: CaptureResult[] = [];
+    for (const seg of segments) {
+      if (segments.length > 1) {
+        sendProgress(tab.id, {
+          mode: "selected-area",
+          stage: `Stitching part ${seg.index}/${seg.total}...`,
+          percent: Math.round((totalChunks / totalChunks) * 100),
+          currentChunk: totalChunks,
+          totalChunks,
+        });
+      }
+      const stitched = await stitchSelectedRange(
+        chunks,
+        { x: normalizedSelection.x, width: normalizedSelection.width, startY: seg.startY, endY: seg.endY },
+        {
+          viewportWidth,
+          viewportHeight,
+          dpr,
+          occludedTopHeight,
+          occludedBottomHeight,
+        }
+      );
+      parts.push({
+        id: crypto.randomUUID(),
+        type: "selected-area",
+        dataUrl: stitched.dataUrl || "",
+        blob: stitched.blob,
+        createdAt: Date.now(),
+        sourceTabId: tab.id,
+        sourceUrl: tab.url,
+        sourceTitle: tab.title,
+        width: stitched.width,
+        height: stitched.height,
+        ...(groupId ? { groupId, partIndex: seg.index, partTotal: seg.total } : {}),
+      });
+    }
     perfStitch = performance.now() - tStitchStart;
 
-    const widthPx = stitchResult.width;
-    const heightPx = stitchResult.height;
+    const first = parts[0]!;
+    first.stoppedEarly = loopResult.stoppedEarly || undefined;
 
     console.debug("[ScreenX][SelectedArea]", JSON.stringify({
       phase: "complete",
-      width: widthPx,
-      height: heightPx,
+      width: first.width,
+      height: first.height,
       chunkCount: chunks.length,
+      parts: parts.length,
     }));
-
-    const result: CaptureResult = {
-      id: crypto.randomUUID(),
-      type: "selected-area",
-      dataUrl: stitchResult.dataUrl || "",
-      blob: stitchResult.blob,
-      createdAt: Date.now(),
-      sourceTabId: tab.id,
-      sourceUrl: tab.url,
-      sourceTitle: tab.title,
-      width: widthPx,
-      height: heightPx,
-    };
 
     sendProgress(tab.id, {
       mode: "selected-area",
@@ -401,89 +500,32 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       totalChunks,
     });
 
-    try {
-      await storePendingCapture(result);
-    } catch (e) {
-      if (e instanceof CaptureError && e.code === "STORAGE_FAILED") {
-        try {
-          const { deleteCapture } = await import("@/storage/idb");
-          await deleteCapture(result.id);
-        } catch {
-          // ignore
-        }
-      }
-      if (e instanceof CaptureError) throw e;
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new CaptureError("STORAGE_FAILED", `Capture succeeded but handoff failed: ${msg}`, {
-        cause: e instanceof Error ? e : undefined,
-      });
+    for (const part of parts) {
+      await persistCapture(part);
     }
 
-    if (tab?.id !== undefined) {
-      try {
-        chrome.tabs.sendMessage(
-          tab.id,
-          {
-            type: "SCREENX_TOAST",
-            toast: {
-              type: "success",
-              title: "Capture Complete",
-              message: "Selected area captured successfully.",
-            },
-          },
-          () => {
-            void chrome.runtime.lastError;
-          }
-        );
-      } catch {
-        // ignore
-      }
-    }
+    // No success toast here: the background handler shows the sticky
+    // copy → editor/download choice toast after capture returns.
 
     const totalTime = performance.now() - t0;
     const avgChunk = chunks.length > 0 ? (perfScroll + perfCapture) / chunks.length : 0;
-    console.log(`[ScreenX][PERF] type=selected-area chunks=${chunks.length} planning=${Math.round(perfPlanning)}ms scroll=${Math.round(perfScroll)}ms capture=${Math.round(perfCapture)}ms stitch=${Math.round(perfStitch)}ms total=${Math.round(totalTime)}ms avgChunk=${Math.round(avgChunk)}ms`);
+    console.log(`[ScreenX][PERF] type=selected-area chunks=${chunks.length} parts=${parts.length} planning=${Math.round(perfPlanning)}ms scroll=${Math.round(perfScroll)}ms capture=${Math.round(perfCapture)}ms stitch=${Math.round(perfStitch)}ms total=${Math.round(totalTime)}ms avgChunk=${Math.round(avgChunk)}ms`);
 
-    return result;
+    return first;
   } catch (e) {
-    const err = e instanceof CaptureError ? e : new CaptureError("CAPTURE_FAILED", e instanceof Error ? e.message : String(e), { cause: e instanceof Error ? e : undefined });
-    if (tab?.id !== undefined && err.code !== "USER_CANCELLED") {
-      try {
-        chrome.tabs.sendMessage(
-          tab.id,
-          {
-            type: "SCREENX_TOAST",
-            toast: {
-              type: "error",
-              title: "Capture Failed",
-              message: err.message || "Failed to capture selected area.",
-            },
-          },
-          () => {
-            void chrome.runtime.lastError;
-          }
-        );
-      } catch {
-        // ignore
-      }
-    }
+    const err = toCaptureError(e);
+    notifyFailure(tab?.id, err, "Failed to capture selected area.");
     throw err;
   } finally {
-    if (tab?.id !== undefined) {
-      try {
-        await sendToContent(tab.id, { type: "SCREENX_HIDE_PROGRESS" });
-      } catch {
-        // ignore
-      }
-      if (prepared) {
-        try {
-          await sendToContent(tab.id, { type: "SCREENX_RESTORE_CAPTURE" });
-        } catch {
-          // ignore
-        }
-      }
+    // Locks release FIRST and are individually guarded (see visible.ts).
+    // sessionHeld: a superseded selection wait owns nothing — releasing
+    // unconditionally here would clear a SUCCESSOR's live lock.
+    try {
+      if (lockToken) await releaseGlobalLock(lockToken);
+    } catch {
+      // ignore — TTL expires it anyway
     }
-    releaseLock();
+    if (sessionHeld) globalSession.release();
+    await finalizeCapture(tab?.id, prepared);
   }
 }
-

@@ -12,10 +12,35 @@ export interface RangeSelection {
   endY: number;
 }
 
+export interface ToastAction {
+  id: "open-editor" | "copy" | "download";
+  label: string;
+  captureId: string;
+  groupId?: string;
+  /**
+   * Pre-encoded PNG data URL for the Copy button, so the click handler can
+   * write to the clipboard synchronously (transient activation only survives
+   * the synchronous part of a user gesture). Absent when oversized — the
+   * button then falls back to the service-worker round trip.
+   */
+  dataUrl?: string;
+}
+
 export interface ToastOptions {
   type: "success" | "error";
   message: string;
   title?: string;
+  /** Action buttons rendered in the toast (content sends SCREENX_TOAST_ACTION on click). */
+  actions?: ToastAction[];
+  /** When true the toast stays until acted on or dismissed (no auto-dismiss). */
+  sticky?: boolean;
+}
+
+export interface ToastActionMessage {
+  type: "SCREENX_TOAST_ACTION";
+  action: ToastAction["id"];
+  captureId: string;
+  groupId?: string;
 }
 
 export interface ProgressPayload {
@@ -27,8 +52,14 @@ export interface ProgressPayload {
   [key: string]: unknown;
 }
 
-// ── Message Type Constants ──────────────────────────────────────────
+// ── Protocol version ────────────────────────────────────────────────
+// Bump when the content protocol changes shape. ensureContentScript refuses
+// stale content scripts (open tabs keep running pre-update code that even
+// re-injection cannot replace — the double-inject guard skips it), telling
+// the user to reload the tab instead of failing cryptically.
+export const CONTENT_PROTOCOL_VERSION = 5;
 
+// ── Message Type Constants ──────────────────────────────────────────
 export const MESSAGE_TYPES = {
   MEASURE_PAGE: "SCREENX_MEASURE_PAGE",
   PREPARE_CAPTURE: "SCREENX_PREPARE_CAPTURE",
@@ -44,6 +75,10 @@ export const MESSAGE_TYPES = {
   SELECTION_CANCEL: "SCREENX_SELECTION_CANCEL",
   PING_CONTENT: "PING_CONTENT",
   TRIGGER_SELECTED_AREA: "TRIGGER_SELECTED_AREA",
+  TRIGGER_CAPTURE: "TRIGGER_CAPTURE",
+  RESOLVE_CONTAINER: "SCREENX_RESOLVE_CONTAINER",
+  TOAST_ACTION: "SCREENX_TOAST_ACTION",
+  COPY_IMAGE: "SCREENX_COPY_IMAGE",
 } as const;
 
 export type MessageTypeValue = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
@@ -96,7 +131,29 @@ export interface CancelSelectionMessage {
 
 export interface SelectionCompleteMessage {
   type: "SCREENX_SELECTION_COMPLETE";
-  selection: RangeSelection;
+  selection: RegionSelection;
+}
+
+/**
+ * User selection in scroll-delta form (viewport box + live scroll readings).
+ * Unlike absolute document coordinates, this cannot go stale between clicks:
+ * the range derives from scroll positions, and the stitcher verifies every
+ * strip against actual pixels.
+ *
+ * Frames: the box travels in VIEWPORT px (also used to resolve the scroll
+ * container). startY/endY/x are derived capture-side by selectionRangeToTargets
+ * (scroll + viewport offsets, no rect correction — see its invariant). x is
+ * document px because the loop pins horizontal scroll to 0 every strip.
+ */
+export interface RegionSelection {
+  boxLeft: number;
+  boxTop: number;
+  boxWidth: number;
+  boxHeight: number;
+  startScrollTop: number;
+  endScrollTop: number;
+  x: number;
+  width: number;
 }
 
 export interface SelectionCancelMessage {
@@ -109,6 +166,31 @@ export interface PingContentMessage {
 
 export interface TriggerSelectedAreaMessage {
   type: "TRIGGER_SELECTED_AREA";
+}
+
+export interface TriggerCaptureMessage {
+  type: "TRIGGER_CAPTURE";
+  captureType: "visible" | "full-page" | "selected-area";
+}
+
+export interface ResolveContainerMessage {
+  type: "SCREENX_RESOLVE_CONTAINER";
+  /** Viewport point (CSS px) whose scroll container should drive capture. */
+  x: number;
+  y: number;
+}
+
+export interface CopyImageMessage {
+  type: "SCREENX_COPY_IMAGE";
+  /** PNG data URL to write to the clipboard (JSON-safe transport). */
+  dataUrl: string;
+}
+
+export interface CopyImageResponse {
+  ok: boolean;
+  error?: string;
+  focused?: boolean;
+  transientActivation?: boolean;
 }
 
 // ── Discriminated Union ─────────────────────────────────────────────
@@ -127,7 +209,11 @@ export type ExtensionMessage =
   | SelectionCompleteMessage
   | SelectionCancelMessage
   | PingContentMessage
-  | TriggerSelectedAreaMessage;
+  | TriggerSelectedAreaMessage
+  | TriggerCaptureMessage
+  | ResolveContainerMessage
+  | CopyImageMessage
+  | ToastActionMessage;
 
 export type ExtensionMessageType = ExtensionMessage["type"];
 
@@ -147,8 +233,16 @@ export interface FixedElementBox {
 export interface MeasureResponse {
   totalWidth: number;
   totalHeight: number;
+  /** Scroll-container viewport (drives scroll ranges/positions). */
   viewportWidth: number;
   viewportHeight: number;
+  /**
+   * True window viewport (drives BITMAP mapping — captureVisibleTab always
+   * photographs the whole window, so scale MUST use these, never the
+   * controller dims above, or every strip mis-scales on nested pages).
+   */
+  winViewportWidth: number;
+  winViewportHeight: number;
   scrollX: number;
   scrollY: number;
   dpr: number;
@@ -168,6 +262,8 @@ export interface ScrollToResponse {
 export interface PingResponse {
   ok: boolean;
   url?: string;
+  /** Content protocol version — see CONTENT_PROTOCOL_VERSION. */
+  proto?: number;
 }
 
 export interface GenericSuccessResponse {

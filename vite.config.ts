@@ -17,6 +17,27 @@ export default defineConfig({
     react(),
     tailwindcss(),
     {
+      name: "enforce-classic-content",
+      generateBundle(_options, bundle) {
+        // content.js is injected via chrome.scripting.executeScript, which
+        // loads it as a CLASSIC script. Any static `import` (from Rollup
+        // code-splitting a module shared with other entries) throws
+        // "SyntaxError: Cannot use import statement outside a module" on
+        // load and silently disables all capture. Background is type:module
+        // so chunks are fine there — this guard covers content.js only.
+        for (const [fileName, chunk] of Object.entries(bundle)) {
+          if (fileName !== "content.js" || chunk.type !== "chunk") continue;
+          if (/(^|[;\n}])\s*import\s*[{*]/.test(chunk.code)) {
+            throw new Error(
+              "[enforce-classic-content] dist/content.js contains a static import statement. " +
+                "A module shared with another entry is being code-split into it. " +
+                "Keep content code self-contained under src/content (see tests/content-bundle.test.ts)."
+            );
+          }
+        }
+      },
+    },
+    {
       name: "copy-manifest",
       closeBundle() {
         const srcManifest = resolve(__dirname, "src/manifest.json");

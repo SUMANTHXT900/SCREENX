@@ -1,0 +1,121 @@
+/**
+ * Scroll settler — transactional scrollToAndSettle state machine
+ * (plan: content/scroll/scrollSettler.ts).
+ */
+import { getScrollController, type ScrollController } from "./ScrollController";
+
+export interface ScrollResult {
+  requestedX: number;
+  requestedY: number;
+  actualX: number;
+  actualY: number;
+  attempts: number;
+  settled: boolean;
+}
+
+export async function scrollToAndSettle(
+  controller: ScrollController | null,
+  x: number,
+  y: number,
+  maxAttempts = 3
+): Promise<ScrollResult> {
+  const c = controller ?? getScrollController();
+  const el = c.element;
+  let originalScrollSnap = "";
+  let originalOverflowAnchor = "";
+  if (el instanceof HTMLElement && el.style) {
+    originalScrollSnap = el.style.scrollSnapType;
+    originalOverflowAnchor = el.style.overflowAnchor;
+    el.style.scrollSnapType = "none";
+    el.style.overflowAnchor = "none";
+  }
+
+  let attempts = 0;
+  let actualX = 0;
+  let actualY = 0;
+  let settled = false;
+
+  let maxScrollY = c.getMaxScrollY();
+  const maxScrollX = c.getMaxScrollX();
+
+  while (attempts < maxAttempts) {
+    attempts++;
+
+    maxScrollY = c.getMaxScrollY();
+    const clampedMaxX = c.getMaxScrollX();
+
+    const clampedX = Math.max(0, Math.min(x, clampedMaxX));
+    const clampedY = Math.max(0, Math.min(y, maxScrollY));
+
+    c.setScrollTop(clampedY);
+    c.setScrollLeft(clampedX);
+
+    // Repaint, then a real settle pause (lazy images, fade-ins), then verify
+    // the container has actually stopped moving before trusting a reading.
+    await new Promise<void>((resolve) => {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setTimeout(resolve, 100 + attempts * 100);
+        });
+      });
+    });
+    await waitForStableScroll(c);
+
+    actualX = c.getScrollLeft();
+    actualY = c.getScrollTop();
+
+    if (Math.abs(actualX - clampedX) <= 2 && Math.abs(actualY - clampedY) <= 2) {
+      settled = true;
+      break;
+    }
+  }
+
+  if (el instanceof HTMLElement && el.style) {
+    el.style.scrollSnapType = originalScrollSnap;
+    el.style.overflowAnchor = originalOverflowAnchor;
+  }
+
+  if (!settled) {
+    // Align-and-continue: report where we actually are instead of throwing.
+    // The capture loop stitches from actual positions and the stitcher
+    // pixel-aligns every seam, so a near-miss still yields a good image.
+    console.warn(
+      "[ScreenX] scroll did not fully settle; continuing with actual position",
+      JSON.stringify({ requested: { x, y }, actual: { x: actualX, y: actualY }, attempts })
+    );
+  }
+
+  void maxScrollX;
+  return { requestedX: x, requestedY: y, actualX, actualY, attempts, settled };
+}
+
+/** Poll until the container stops moving (≤0.5px between frames, ≤30 frames). */
+export function waitForStableScroll(c: ScrollController): Promise<void> {
+  return new Promise((resolve) => {
+    let previous: number;
+    try {
+      previous = c.getScrollTop();
+    } catch {
+      resolve();
+      return;
+    }
+    let attempt = 0;
+    const tick = () => {
+      attempt++;
+      let current: number;
+      try {
+        current = c.getScrollTop();
+      } catch {
+        resolve();
+        return;
+      }
+      if (Math.abs(current - previous) < 0.5 || attempt >= 30) {
+        resolve();
+        return;
+      }
+      previous = current;
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  });
+}

@@ -1,12 +1,12 @@
-import { CanvasStitcher } from "./stitch/canvasStitcher";
+/**
+ * Stitch facade — thin wrapper over CanvasStitcher (Stage 3 unified).
+ * Canonical DTOs live in ./stitch/canvasStitcher.ts; this file re-exports
+ * for backward compatibility.
+ */
+import { createStitcher } from "./stitch/canvasStitcher";
+import type { StitchChunk } from "./stitch/canvasStitcher";
 
-export interface StitchChunk {
-  /** base64 PNG dataUrl captured at this position */
-  dataUrl: string;
-  /** scroll position in CSS pixels (top-left of viewport) */
-  x: number;
-  y: number;
-}
+export type { StitchChunk, StitchOutput } from "./stitch/canvasStitcher";
 
 export interface StitchInput {
   chunks: StitchChunk[];
@@ -21,24 +21,20 @@ export interface StitchInput {
   occludedBottomHeight?: number;
 }
 
-export interface StitchOutput {
-  blob: Blob;
-  width: number;
-  height: number;
-  dataUrl: string;
-}
+export async function stitchImages(input: StitchInput) {
+  console.debug(
+    "[ScreenX] stitchImages input",
+    JSON.stringify({
+      chunks: input.chunks.length,
+      totalWidth: input.totalWidth,
+      totalHeight: input.totalHeight,
+      viewportWidth: input.viewportWidth,
+      viewportHeight: input.viewportHeight,
+      dpr: input.dpr,
+    })
+  );
 
-export async function stitchImages(input: StitchInput): Promise<StitchOutput> {
-  console.debug("[ScreenX] stitchImages input", JSON.stringify({
-    chunks: input.chunks.length,
-    totalWidth: input.totalWidth,
-    totalHeight: input.totalHeight,
-    viewportWidth: input.viewportWidth,
-    viewportHeight: input.viewportHeight,
-    dpr: input.dpr,
-  }));
-
-  const stitcher = new CanvasStitcher({
+  const stitcher = createStitcher({
     chunks: input.chunks,
     viewportWidth: input.viewportWidth,
     viewportHeight: input.viewportHeight,

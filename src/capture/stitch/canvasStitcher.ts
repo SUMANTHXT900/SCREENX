@@ -1,4 +1,16 @@
 import { CaptureError } from "@/types";
+import {
+  MAX_CANVAS_HEIGHT,
+  MAX_CANVAS_PIXELS,
+  MAX_CANVAS_WIDTH,
+  MAX_CHUNKS,
+  MAX_TOTAL_HEIGHT,
+} from "./limits";
+import { ALIGN_BAND, ALIGN_SEARCH, findBestAlignment } from "./coordinateMath";
+import type { RangeSelection } from "@/messaging/events";
+
+// RangeSelection is single-sourced in @/messaging/events; re-exported here for compat.
+export type { RangeSelection } from "@/messaging/events";
 
 export interface StitchChunk {
   dataUrl: string;
@@ -11,13 +23,6 @@ export interface StitchOutput {
   width: number;
   height: number;
   dataUrl: string;
-}
-
-export interface RangeSelection {
-  x: number;
-  width: number;
-  startY: number;
-  endY: number;
 }
 
 export interface CanvasStitcherOptions {
@@ -34,11 +39,103 @@ export interface CanvasStitcherOptions {
   selection?: RangeSelection;
 }
 
-const MAX_TOTAL_HEIGHT = 65000;
-const MAX_CANVAS_PIXELS = 268_435_456;
-const MAX_CHUNKS = 300;
+/**
+ * Stitcher contract — any class with stitch() can back the pipeline.
+ * CanvasStitcher is the default; override the factory to swap it
+ * (e.g. a WebGL stitcher, a worker-based stitcher, a test stub):
+ *
+ *   import { setStitcherFactory } from "@/capture/stitch/canvasStitcher";
+ *   setStitcherFactory((opts) => new MyStitcher(opts));
+ */
+export interface Stitcher {
+  stitch(): Promise<StitchOutput>;
+}
 
-export class CanvasStitcher {
+export type StitcherFactory = (options: CanvasStitcherOptions) => Stitcher;
+
+let stitcherFactory: StitcherFactory = (options) => new CanvasStitcher(options);
+
+export function setStitcherFactory(factory: StitcherFactory): void {
+  stitcherFactory = factory;
+}
+
+export function resetStitcherFactory(): void {
+  stitcherFactory = (options) => new CanvasStitcher(options);
+}
+
+export function createStitcher(options: CanvasStitcherOptions): Stitcher {
+  return stitcherFactory(options);
+}
+
+type Ctx2D = CanvasRenderingContext2D;
+
+/** 2d context with readback hint; null when unavailable (alignment is skipped). */
+function getReadableContext(canvas: OffscreenCanvas): Ctx2D | null {
+  try {
+    const ctx = (canvas as OffscreenCanvas).getContext("2d", { willReadFrequently: true });
+    if (ctx) return ctx as unknown as Ctx2D;
+  } catch {
+    // fall through to plain context
+  }
+  try {
+    const ctx = (canvas as OffscreenCanvas).getContext("2d");
+    return (ctx ?? null) as unknown as Ctx2D | null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Nudge a slice's destination Y so its top band matches the already-drawn
+ * canvas. Returns the (possibly unchanged) Y. Never throws — any readback
+ * failure falls back to scroll math.
+ */
+function alignSliceToCanvas(
+  ctx: Ctx2D,
+  bmp: ImageBitmap,
+  srcX: number,
+  srcY: number,
+  srcW: number,
+  srcH: number,
+  dstX: number,
+  expectedDstY: number,
+  canvasWidth: number,
+  canvasHeight: number
+): number {
+  try {
+    if (srcW <= 0 || srcH <= 0) return expectedDstY;
+    const bandH = Math.min(ALIGN_BAND, srcH);
+    const scratch = typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(srcW, bandH)
+      : (() => {
+          const el = document.createElement("canvas");
+          el.width = srcW;
+          el.height = bandH;
+          return el as unknown as OffscreenCanvas;
+        })();
+    const sctx = (scratch as OffscreenCanvas).getContext("2d") as unknown as Ctx2D | null;
+    if (!sctx) return expectedDstY;
+    sctx.drawImage(bmp as unknown as CanvasImageSource, srcX, srcY, srcW, bandH, 0, 0, srcW, bandH);
+    const bandPixels = sctx.getImageData(0, 0, srcW, bandH);
+
+    const regionTop = Math.max(0, expectedDstY - ALIGN_SEARCH);
+    const regionBottom = Math.min(canvasHeight, expectedDstY + ALIGN_SEARCH + bandH);
+    if (regionBottom - regionTop < bandH || dstX + srcW > canvasWidth) return expectedDstY;
+    const regionPixels = ctx.getImageData(dstX, regionTop, srcW, regionBottom - regionTop);
+
+    const found = findBestAlignment(
+      { data: bandPixels.data, width: srcW, height: bandH },
+      { data: regionPixels.data, width: srcW, height: regionBottom - regionTop },
+      regionTop,
+      expectedDstY
+    );
+    return found.matched ? found.y : expectedDstY;
+  } catch {
+    return expectedDstY;
+  }
+}
+
+export class CanvasStitcher implements Stitcher {
   private chunks: StitchChunk[];
   private viewportWidth: number;
   private viewportHeight: number;
@@ -96,7 +193,7 @@ export class CanvasStitcher {
 
     const finalWidth = Math.round(this.targetWidth * this.dpr);
     const finalHeight = Math.round(this.targetHeight * this.dpr);
-    if (finalWidth > 32767 || finalHeight > 65535 || finalWidth * finalHeight > MAX_CANVAS_PIXELS) {
+    if (finalWidth > MAX_CANVAS_WIDTH || finalHeight > MAX_CANVAS_HEIGHT || finalWidth * finalHeight > MAX_CANVAS_PIXELS) {
       const typeStr = this.isFullPage ? "Stitched image" : "Selected area";
       throw new CaptureError(
         "PAGE_TOO_LARGE",
@@ -223,7 +320,7 @@ export class CanvasStitcher {
             return el as unknown as OffscreenCanvas;
           })();
 
-    const ctx = canvas.getContext("2d");
+    const ctx = getReadableContext(canvas);
     if (!ctx) throw new CaptureError("STITCH_FAILED", "Canvas context unavailable.");
 
     ctx.fillStyle = "#ffffff";
@@ -231,6 +328,9 @@ export class CanvasStitcher {
 
     let coveredDocY = this.targetY;
     const targetEndY = this.targetY + this.targetHeight;
+    // Pixel-drift carried across seams: each alignment correction shifts all
+    // later strips, instead of being rediscovered at every seam.
+    let drift = 0;
 
     for (let i = 0; i < this.chunks.length; i++) {
       const chunk = this.chunks[i]!;
@@ -276,9 +376,34 @@ export class CanvasStitcher {
         const srcH = Math.min(bmp.height - srcY, globalBottom - globalTop);
 
         const dstX = globalLeft - globalSelX;
-        const dstY = globalTop - globalSelY;
         const dstW = srcW;
         const dstH = srcH;
+        // Scroll math predicts dstY; the page may have shifted, so verify
+        // against actual pixels (first strip is trusted as the anchor).
+        let dstY = globalTop - globalSelY + drift;
+        if (i > 0) {
+          const aligned = alignSliceToCanvas(
+            ctx as unknown as CanvasRenderingContext2D,
+            bmp,
+            srcX,
+            srcY,
+            srcW,
+            srcH,
+            dstX,
+            dstY,
+            finalWidth,
+            finalHeight
+          );
+          if (aligned !== dstY) {
+            console.debug(
+              "[ScreenX] strip nudged to line up with previous strip",
+              JSON.stringify({ chunk: i, deltaPx: aligned - dstY })
+            );
+            drift += aligned - dstY;
+            dstY = aligned;
+          }
+        }
+        dstY = Math.max(0, Math.min(dstY, Math.max(0, finalHeight - dstH)));
 
         (ctx as unknown as CanvasRenderingContext2D).drawImage(
           bmp as unknown as CanvasImageSource,

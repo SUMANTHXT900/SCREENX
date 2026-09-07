@@ -1,27 +1,21 @@
-import { CaptureError, type CaptureResult, type ProgressPayload } from "@/types";
-import { storePendingCapture } from "@/storage/captureHandoff";
+import { CaptureError, type CaptureResult } from "@/types";
 import { isRestrictedUrl, queryActiveTab } from "./captureUtils";
-import { captureVisibleTabThrottled } from "./captureVisibleTab";
-
-function sendProgress(tabId: number, progress: ProgressPayload): void {
-  try {
-    chrome.tabs.sendMessage(tabId, { type: "SCREENX_PROGRESS", progress }, () => {
-      void chrome.runtime.lastError;
-    });
-  } catch {
-    // ignore
-  }
-  if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
-    try {
-      chrome.runtime.sendMessage({ type: "SCREENX_PROGRESS", progress }).catch(() => {});
-    } catch {
-      // ignore
-    }
-  }
-}
+import { ensureContentScript } from "./client/ensureContent";
+import { captureVisibleTabThrottled } from "./client/tabCaptureClient";
+import { hideProgressHud, restoreCapture, sendProgress, showProgressHud } from "./client/contentBridge";
+import { clearCaptureBadge } from "@/messaging/client";
+import {
+  notifyFailure,
+  persistCapture,
+  toCaptureError,
+} from "./engine/finalize";
+import { globalSession } from "./engine/CaptureSession";
+import { acquireGlobalLock, releaseGlobalLock } from "./engine/globalLock";
 
 export async function captureVisible(): Promise<CaptureResult> {
+  globalSession.acquire();
   let tab: chrome.tabs.Tab | null = null;
+  let lockToken: string | null = null;
 
   try {
     tab = await queryActiveTab();
@@ -37,8 +31,15 @@ export async function captureVisible(): Promise<CaptureResult> {
       throw new CaptureError("NO_ACTIVE_TAB", "No active tab found. Open a webpage and try again.");
     }
 
+    lockToken = await acquireGlobalLock("visible", tab.id);
+
+    // Visible needs no scrolling, but the post-capture UX (clipboard copy,
+    // choice toast, progress HUD) all talk to the content script — ensure a
+    // listener exists or they fail silently with "receiving end does not exist".
+    await ensureContentScript(tab);
+
     const totalChunks = 1;
-    let completedChunks = 0;
+    const completedChunks = 0;
 
     sendProgress(tab.id, {
       mode: "visible",
@@ -62,32 +63,10 @@ export async function captureVisible(): Promise<CaptureResult> {
         tab.windowId,
         2,
         async () => {
-          if (tab?.id) {
-            try {
-              await new Promise<void>((resolve) => {
-                chrome.tabs.sendMessage(tab!.id!, { type: "SCREENX_HIDE_PROGRESS" }, () => {
-                  void chrome.runtime.lastError;
-                  resolve();
-                });
-              });
-            } catch {
-              // ignore
-            }
-          }
+          if (tab?.id !== undefined) await hideProgressHud(tab.id);
         },
         async () => {
-          if (tab?.id) {
-            try {
-              await new Promise<void>((resolve) => {
-                chrome.tabs.sendMessage(tab!.id!, { type: "SCREENX_SHOW_PROGRESS" }, () => {
-                  void chrome.runtime.lastError;
-                  resolve();
-                });
-              });
-            } catch {
-              // ignore
-            }
-          }
+          if (tab?.id !== undefined) await showProgressHud(tab.id);
         }
       );
     } catch (e) {
@@ -96,18 +75,17 @@ export async function captureVisible(): Promise<CaptureResult> {
       throw new CaptureError("CAPTURE_FAILED", msg, { cause: e as Error });
     }
 
-    completedChunks = 1;
+    const doneChunks = 1;
     sendProgress(tab.id, {
       mode: "visible",
       stage: "Processing...",
-      percent: Math.round((completedChunks / totalChunks) * 100),
+      percent: Math.round((doneChunks / totalChunks) * 100),
       currentChunk: 1,
       totalChunks,
     });
 
     console.debug("[ScreenX] visible capture", JSON.stringify({ windowId: tab.windowId, dataUrlLength: dataUrl.length }));
 
-    // Try to get viewport dimensions for metadata
     let width: number | undefined;
     let height: number | undefined;
     let blob: Blob | undefined;
@@ -151,98 +129,39 @@ export async function captureVisible(): Promise<CaptureResult> {
     sendProgress(tab.id, {
       mode: "visible",
       stage: "Finalizing...",
-      percent: Math.round((completedChunks / totalChunks) * 100),
+      percent: Math.round((doneChunks / totalChunks) * 100),
       currentChunk: 1,
       totalChunks,
     });
 
-    try {
-      await storePendingCapture(result);
-    } catch (e) {
-      if (e instanceof CaptureError && e.code === "STORAGE_FAILED") {
-        try {
-          const { deleteCapture } = await import("@/storage/idb");
-          await deleteCapture(result.id);
-        } catch {
-          // ignore cleanup failure
-        }
-      }
-      if (e instanceof CaptureError) throw e;
-      const msg = e instanceof Error ? e.message : String(e);
-      throw new CaptureError("STORAGE_FAILED", `Capture succeeded but handoff failed: ${msg}`, {
-        cause: e instanceof Error ? e : undefined,
-      });
-    }
+    await persistCapture(result);
 
-    if (tab?.id !== undefined) {
-      try {
-        chrome.tabs.sendMessage(
-          tab.id,
-          {
-            type: "SCREENX_TOAST",
-            toast: {
-              type: "success",
-              title: "Capture Complete",
-              message: "Visible area captured successfully.",
-            },
-          },
-          () => {
-            void chrome.runtime.lastError;
-          }
-        );
-      } catch {
-        // ignore
-      }
-    }
-
+    // No success toast here: the background handler shows the sticky
+    // copy → editor/download choice toast after capture returns.
     return result;
   } catch (e) {
-    const err = e instanceof CaptureError ? e : new CaptureError("CAPTURE_FAILED", e instanceof Error ? e.message : String(e), { cause: e instanceof Error ? e : undefined });
-    if (tab?.id !== undefined && err.code !== "USER_CANCELLED") {
-      try {
-        chrome.tabs.sendMessage(
-          tab.id,
-          {
-            type: "SCREENX_TOAST",
-            toast: {
-              type: "error",
-              title: "Capture Failed",
-              message: err.message || "Failed to capture visible area.",
-            },
-          },
-          () => {
-            void chrome.runtime.lastError;
-          }
-        );
-      } catch {
-        // ignore
-      }
-    }
+    const err = toCaptureError(e);
+    notifyFailure(tab?.id, err, "Failed to capture visible area.");
     throw err;
   } finally {
+    // Locks release FIRST and are individually guarded: a throwing HUD call
+    // must never skip them (that leak is the phantom CAPTURE_IN_PROGRESS).
+    // A successor capture starting before the HUD hides below is harmless —
+    // HUD show/hide is idempotent per tab.
+    try {
+      if (lockToken) await releaseGlobalLock(lockToken);
+    } catch {
+      // ignore — TTL expires it anyway
+    }
+    globalSession.release();
+    // Visible has no engine finalize step — clear the badge here so the
+    // toolbar never sticks at 100% (progress sets it, nothing else clears it).
+    clearCaptureBadge();
     if (tab?.id !== undefined) {
-      try {
-        await new Promise<void>((resolve) => {
-          chrome.tabs.sendMessage(tab!.id!, { type: "SCREENX_HIDE_PROGRESS" }, () => {
-            void chrome.runtime.lastError;
-            resolve();
-          });
-        });
-      } catch {
-        // ignore
-      }
-      try {
-        await new Promise<void>((resolve) => {
-          chrome.tabs.sendMessage(tab!.id!, { type: "SCREENX_RESTORE_CAPTURE" }, () => {
-            void chrome.runtime.lastError;
-            resolve();
-          });
-        });
-      } catch {
-        // ignore
-      }
+      await hideProgressHud(tab.id);
+      await restoreCapture(tab.id);
     }
   }
 }
 
-export { isRestrictedUrl as _isRestrictedUrlForTest, queryActiveTab as _queryActiveTabForTest };
+export { isRestrictedUrl as _isRestrictedUrlForTest, queryActiveTab as _queryActiveTabForTest } from "./captureUtils";

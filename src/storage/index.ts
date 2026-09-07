@@ -1,4 +1,6 @@
 /**
- * Storage layer — Step 1 provides session handoff; IndexedDB reserved for later.
+ * Storage layer — barrels for IndexedDB + session handoff + history.
  */
-export * from "./captureHandoff";
+export * from "./handoff/index";
+export * from "./idb/index";
+export * from "./history/index";

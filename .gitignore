@@ -5,3 +5,17 @@ dist
 .env
 .env.*
 *.tsbuildinfo
+coverage/
+
+# Local Antigravity CLI context dumps (transcripts/logs) — never commit
+contextfromantigravitycli/
+
+# Reference repos & working notes — never commit
+friendsrepo/
+docs/
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.local

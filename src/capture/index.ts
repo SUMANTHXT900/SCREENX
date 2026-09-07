@@ -1,25 +1,23 @@
-import { CaptureError, type CaptureResult, type CaptureType } from "@/types";
+import { type CaptureResult, type CaptureType } from "@/types";
 import { captureVisible } from "./visible";
 import { captureFullPage } from "./fullPage";
 import { captureSelectedArea } from "./selectedArea";
+import { registerCaptureEngine, runCaptureEngine } from "./engine/registry";
+
+// Built-in engines self-register here. To swap an engine, call
+// registerCaptureEngine() again with the same type — later registration wins.
+registerCaptureEngine("visible", captureVisible);
+registerCaptureEngine("full-page", captureFullPage);
+registerCaptureEngine("selected-area", captureSelectedArea);
 
 /**
  * Unified capture entry point.
  * Popup and background (commands) must both call this — no duplicated logic.
+ * Dispatches through the engine registry, so engines are swappable without
+ * touching this router.
  */
 export async function capture(type: CaptureType): Promise<CaptureResult> {
-  switch (type) {
-    case "visible":
-      return captureVisible();
-    case "full-page":
-      return captureFullPage();
-    case "selected-area":
-      return captureSelectedArea();
-    default: {
-      const _exhaustive: never = type;
-      throw new CaptureError("UNSUPPORTED_TYPE", `Unknown capture type: ${String(_exhaustive)}`);
-    }
-  }
+  return runCaptureEngine(type);
 }
 
 // ---------------------------------------------------------------------------
@@ -34,8 +32,27 @@ export function getEditorUrl(captureId: string): string {
   return `${base}?captureId=${encodeURIComponent(captureId)}`;
 }
 
+export function getGroupEditorUrl(groupId: string): string {
+  const base =
+    typeof chrome !== "undefined" && chrome.runtime?.getURL
+      ? chrome.runtime.getURL("editor.html")
+      : "/editor.html";
+  return `${base}?groupId=${encodeURIComponent(groupId)}`;
+}
+
 export async function openEditorForCapture(captureId: string): Promise<void> {
   const url = getEditorUrl(captureId);
+  if (typeof chrome !== "undefined" && chrome.tabs?.create) {
+    await chrome.tabs.create({ url });
+  } else {
+    window.open(url, "_blank");
+  }
+}
+
+/** Open a capture result — routes auto-split groups to the stacked group view. */
+export async function openEditorForCaptureResult(result: { id: string; groupId?: string }): Promise<void> {
+  const url = result.groupId ? getGroupEditorUrl(result.groupId) : getEditorUrl(result.id);
+  console.debug("[ScreenX] opening editor:", url);
   if (typeof chrome !== "undefined" && chrome.tabs?.create) {
     await chrome.tabs.create({ url });
   } else {
@@ -48,10 +65,14 @@ export async function openEditorForCapture(captureId: string): Promise<void> {
  */
 export async function captureAndOpenEditor(type: CaptureType): Promise<CaptureResult> {
   const result = await capture(type);
-  await openEditorForCapture(result.id);
+  await openEditorForCaptureResult(result);
   return result;
 }
 
 export { captureVisible } from "./visible";
 export { captureFullPage } from "./fullPage";
 export { captureSelectedArea } from "./selectedArea";
+
+// Submodule barrels for discoverability (plan structure)
+export * from "./planner/index";
+export * from "./stitch/index";

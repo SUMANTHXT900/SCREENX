@@ -1,6 +1,5 @@
 /**
- * Zustand stores — reserved.
- * Will add stores only when actual state is needed (captureStore, editorStore, etc.).
- * Architecture supports colocated slices under src/state/* later.
+ * Shared global application state — barrels.
  */
-export {};
+export * from "./useCaptureStore";
+export * from "./useSettingsStore";

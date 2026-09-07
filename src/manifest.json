@@ -17,13 +17,6 @@
     "service_worker": "background.js",
     "type": "module"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["content.js"],
-      "run_at": "document_idle"
-    }
-  ],
   "commands": {
     "capture-visible": {
       "suggested_key": {
@@ -47,7 +40,7 @@
       "description": "Capture selected area"
     }
   },
-  "permissions": ["activeTab", "storage", "scripting"],
+  "permissions": ["activeTab", "storage", "scripting", "clipboardWrite", "downloads", "notifications"],
   "web_accessible_resources": [
     {
       "resources": ["editor.html", "workspace.html", "history.html", "assets/*", "icons/*"],

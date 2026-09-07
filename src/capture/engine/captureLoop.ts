@@ -1,87 +1,63 @@
-import { CaptureError, type ProgressPayload } from "@/types";
-import { captureVisibleTabThrottled } from "../captureVisibleTab";
+import { CaptureError } from "@/types";
+import { captureVisibleTabThrottled } from "../client/tabCaptureClient";
 import { withTimeout } from "../captureUtils";
-import type { StitchChunk } from "../stitch";
+import { sendProgress, sendToContent } from "../client/contentBridge";
+import type { StitchChunk } from "../stitch/canvasStitcher";
 
-export interface CaptureLoopOptions {
-  tabId: number;
-  windowId?: number;
-  mode: "full-page" | "selected-area";
-  positions: number[];
-  totalTimeout: number;
-  controllerType?: string;
-}
+export type { CaptureLoopOptions, CaptureLoopResult } from "./types";
 
-export interface CaptureLoopResult {
-  chunks: StitchChunk[];
-  perfScroll: number;
-  perfCapture: number;
-}
+import { checkAdvance, type CaptureLoopOptions, type CaptureLoopResult } from "./types";
 
 const CONTENT_TIMEOUT_MS = 3500;
 const CAPTURE_TIMEOUT_MS = 6000;
+/** Settle tolerance (CSS px): readings this close to a requested origin count as the origin. */
+export const ORIGIN_SNAP_PX = 2;
 
-function sendToContent<T>(tabId: number, message: unknown, timeoutMs = CONTENT_TIMEOUT_MS): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
-      reject(new CaptureError("TIMEOUT", `Content script did not respond to ${(message as { type?: string })?.type} within ${timeoutMs}ms. Try reloading the page.`));
-    }, timeoutMs);
-
-    try {
-      chrome.tabs.sendMessage(tabId, message, (response) => {
-        if (timedOut) return;
-        clearTimeout(timer);
-        const err = chrome.runtime.lastError;
-        if (err) {
-          const msg = err.message ?? "Unknown messaging error";
-          if (/Receiving end does not exist/i.test(msg)) {
-            reject(new CaptureError("CONTENT_SCRIPT_NOT_READY", "Content script not ready. Please reload the page and try again.", { cause: err }));
-          } else {
-            reject(new CaptureError("CAPTURE_FAILED", msg, { cause: err }));
-          }
-          return;
-        }
-        if (response && typeof response === "object" && "error" in response) {
-          const msg = (response as { error: string }).error;
-          reject(new CaptureError("CAPTURE_FAILED", msg));
-          return;
-        }
-        resolve(response as T);
-      });
-    } catch (e) {
-      clearTimeout(timer);
-      const msg = e instanceof Error ? e.message : String(e);
-      reject(new CaptureError("CAPTURE_FAILED", msg, { cause: e as Error }));
-    }
-  });
+/**
+ * Snap near-origin readings to the origin. The stitcher keeps the top rows
+ * of a top-anchored (y≈0) chunk, so a reading of 1–2px would both trim real
+ * top content AND skip the keep-top path — snapping keeps it exact while the
+ * pixel aligner absorbs the ≤2px residue.
+ */
+export function snapChunkCoord(requested: number, actual: number): number {
+  return requested === 0 && actual >= 0 && actual <= ORIGIN_SNAP_PX ? 0 : actual;
 }
 
-function sendProgress(tabId: number, progress: ProgressPayload): void {
+/**
+ * Abort the capture if the user left the captured tab mid-run.
+ * captureVisibleTab always snaps the ACTIVE tab of the window, so tab
+ * switches silently corrupt the stitch — fail fast with a clear message
+ * instead. Permission failures degrade to "skip check", never to abort.
+ */
+async function assertStillOnTab(tabId: number, windowId: number | undefined): Promise<void> {
+  let tab: chrome.tabs.Tab | null = null;
   try {
-    chrome.tabs.sendMessage(tabId, { type: "SCREENX_PROGRESS", progress }, () => {
-      void chrome.runtime.lastError;
-    });
+    tab = await chrome.tabs.get(tabId);
   } catch {
-    // ignore
+    return;
   }
-  if (typeof chrome !== "undefined" && chrome.runtime?.sendMessage) {
-    try {
-      chrome.runtime.sendMessage({ type: "SCREENX_PROGRESS", progress }).catch(() => {});
-    } catch {
-      // ignore
-    }
+  if (!tab) return;
+  const win = windowId ?? tab.windowId;
+  if (tab.windowId === win && !tab.active) {
+    throw new CaptureError(
+      "TAB_SWITCHED",
+      "Capture stopped because you switched tabs. Please stay on the page until the capture finishes, then try again."
+    );
   }
 }
 
 export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<CaptureLoopResult> {
-  const { tabId, windowId, mode, positions, totalTimeout, controllerType } = options;
+  const { tabId, windowId, mode, positions, totalTimeout, controllerType, onChunk } = options;
   const chunks: StitchChunk[] = [];
   let perfScroll = 0;
   let perfCapture = 0;
   const start = Date.now();
   const totalChunks = positions.length;
+  // Consecutive non-advancing scrolls: the page end moved under us (lazy
+  // collapse). Break and stitch the partial run instead of throwing — the
+  // stitcher dedupes overlap and warns about real gaps.
+  let stuckStreak = 0;
+  let stoppedEarly = false;
 
   for (let i = 0; i < positions.length; i++) {
     const requestedY = positions[i]!;
@@ -97,6 +73,8 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
       }
     }
 
+    await assertStillOnTab(tabId, windowId);
+
     sendProgress(tabId, {
       mode,
       stage: "Scrolling...",
@@ -105,6 +83,14 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
       totalChunks,
       currentY: requestedY,
     });
+    // Lock heartbeat: each chunk proves the owner is alive and extends the
+    // claim, so only a dead owner ever lets the TTL expire. Fire-and-forget
+    // by contract — a slow/failed heartbeat must never stall the loop.
+    try {
+      onChunk?.(i);
+    } catch {
+      // ignore — heartbeat is best-effort
+    }
 
     const tScrollStart = performance.now();
     const scrollRes = await withTimeout(
@@ -118,6 +104,9 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     );
     perfScroll += performance.now() - tScrollStart;
 
+    // Align-and-continue: the content script always reports where it actually
+    // is (ok:true). Legacy not-ok responses are tolerated the same way when
+    // they carry actuals; only a response with no position at all still throws.
     if (!scrollRes.ok) {
       let errJson: { code?: string; actualX?: number; actualY?: number } | null = null;
       try {
@@ -125,38 +114,43 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
       } catch {
         errJson = null;
       }
-      
+
       if (errJson && errJson.code === "SCROLL_POSITION_UNSTABLE") {
         console.warn(`[ScreenX] Scroll to ${requestedY} repeatedly failed. Settled at ${errJson.actualY}. Continuing with actual position.`);
         scrollRes.actualY = errJson.actualY;
         scrollRes.actualX = errJson.actualX;
-      } else {
+      } else if (scrollRes.actualY === undefined) {
         throw new CaptureError("SCROLL_POSITION_UNSTABLE", scrollRes.error || "Scroll failed");
+      } else {
+        console.warn(`[ScreenX] Scroll to ${requestedY} unsettled (${scrollRes.error ?? "unknown"}). Continuing with actual y=${scrollRes.actualY}.`);
       }
     }
 
     const actualY = scrollRes.actualY ?? requestedY;
     const actualX = scrollRes.actualX ?? 0;
+    // Snap near-origin readings so a top-anchored chunk hits the stitcher's
+    // keep-top path exactly (see snapChunkCoord).
+    const recordY = snapChunkCoord(requestedY, actualY);
+    const recordX = snapChunkCoord(0, actualX);
 
-    if (i > 0 && actualY <= chunks[i - 1]!.y) {
-      const duplicateInfo = {
-        stage: "DUPLICATE_SCROLL_POSITION",
-        chunkIndex: i,
-        previousActualY: chunks[i - 1]!.y,
-        currentActualY: actualY,
-        requestedY,
-        controller: controllerType,
-      };
-      if (mode === "selected-area") {
-        console.error("[ScreenX][SelectedArea] duplicate scroll position", JSON.stringify(duplicateInfo));
-      } else {
-        console.error("[ScreenX] duplicate scroll position in fullPage", JSON.stringify(duplicateInfo));
-      }
-      throw new CaptureError(
-        "CAPTURE_FAILED",
-        `Duplicate scroll position detected: chunk ${i + 1} at y=${actualY} did not advance past previous y=${chunks[i - 1]!.y}.`,
-        { cause: new Error(JSON.stringify(duplicateInfo)) }
+    // Compare against the last PUSHED chunk (not chunks[i-1]): skipped
+    // iterations leave gaps, and indexing by loop counter crashes on undefined.
+    const prevY = chunks.length > 0 ? chunks[chunks.length - 1]!.y : undefined;
+    const advance = checkAdvance(actualY, prevY, stuckStreak);
+    stuckStreak = advance.streak;
+    if (advance.action !== "ok") {
+      console.warn(
+        `[ScreenX] scroll did not advance past y=${prevY} (streak ${stuckStreak}); stitching will dedupe overlap.`,
+        JSON.stringify({ chunkIndex: i, requestedY, actualY, controller: controllerType })
       );
+      if (advance.action === "stop") {
+        console.warn(
+          `[ScreenX] stopping capture early at chunk ${i + 1}/${positions.length} — page end moved under us; stitching partial run.`
+        );
+        stoppedEarly = true;
+        break;
+      }
+      continue;
     }
 
     if (mode === "selected-area") {
@@ -180,12 +174,17 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     });
 
     const tCaptureStart = performance.now();
+    // Constant-HUD contract: the top reserve band is discarded from every
+    // non-top chunk, so the HUD only ever needs hiding for a top-anchored
+    // exposure (whose rows the stitcher keeps). Every other exposure leaves
+    // the HUD up — no per-chunk blinking.
+    const hideForExposure = recordY === 0;
     const dataUrl = await withTimeout(
       captureVisibleTabThrottled(
         windowId,
         2,
         async () => {
-          if (tabId) {
+          if (tabId && hideForExposure) {
             try {
               await sendToContent(tabId, { type: "SCREENX_HIDE_PROGRESS" });
             } catch {
@@ -194,7 +193,7 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
           }
         },
         async () => {
-          if (tabId) {
+          if (tabId && hideForExposure) {
             try {
               await sendToContent(tabId, { type: "SCREENX_SHOW_PROGRESS" });
             } catch {
@@ -219,7 +218,7 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
       console.debug(`[ScreenX] full-page chunk ${chunks.length + 1}/${positions.length} y=${actualY} (requested ${requestedY}) captured ${Math.round(dataUrl.length / 1024)}KB`);
     }
 
-    chunks.push({ dataUrl, x: actualX, y: actualY });
+    chunks.push({ dataUrl, x: recordX, y: recordY });
 
     sendProgress(tabId, {
       mode,
@@ -234,6 +233,7 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
   return {
     chunks,
     perfScroll,
-    perfCapture
+    perfCapture,
+    stoppedEarly,
   };
 }
