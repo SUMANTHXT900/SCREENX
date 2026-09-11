@@ -33,6 +33,8 @@ describe("content bundle stays classic-script safe", () => {
         if (stripped.startsWith("import type")) return;
         // Intra-content relative imports bundle inline — fine. Anything
         // reaching outside src/content becomes a shared chunk + `import`.
+        // (Root-level sibling clipboardWrite.js is intra-content; listed
+        // explicitly because the directory-prefix heuristic below can't see it.)
         const m = stripped.match(/from\s*["']([^"']+)["']/);
         if (!m) return;
         const spec = m[1]!;
@@ -40,7 +42,8 @@ describe("content bundle stays classic-script safe", () => {
           spec.startsWith("@/") ||
           spec.startsWith("@messaging") ||
           (spec.includes("..") && !spec.startsWith("../scroll") && !spec.startsWith("../dom") &&
-            !spec.startsWith("../ui") && !spec.startsWith("../selection") && !spec.startsWith("./"));
+            !spec.startsWith("../ui") && !spec.startsWith("../selection") &&
+            !spec.startsWith("../clipboardWrite") && !spec.startsWith("./"));
         if (escapes) offenders.push(`${file}:${i + 1}: ${stripped}`);
       });
     }

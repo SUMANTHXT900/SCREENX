@@ -11,6 +11,7 @@ import { updateProgressHud, hideProgressHud, showProgressHud, type ProgressPaylo
 import { showToast, type ToastOptions } from "./ui/toast.js";
 import { enterSelectionMode, cancelSelectionMode, dismissSelectionMode } from "./selection/selectionManager.js";
 import { getOverlay } from "./selection/selectionOverlay.js";
+import { claimCopySlot, dataUrlToBlob } from "./clipboardWrite.js";
 
 /**
  * MUST stay in sync with CONTENT_PROTOCOL_VERSION in src/messaging/events.ts.
@@ -80,10 +81,9 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
           case "SCREENX_COPY_IMAGE": {
             // Clipboard writes need a focused document + transient activation,
             // which only exist here in the page — never in the worker. The
-            // ClipboardItem is constructed (and write() called) with NO await
-            // before it: activation is captured at write() while the blob
-            // resolves lazily afterwards. http: pages reject — graceful false.
-            const { dataUrl } = message as { dataUrl?: unknown };
+            // The blob is decoded SYNCHRONOUSLY (no fetch) and write() is
+            // called with no await before it, so activation is captured now.
+            const { dataUrl, seq } = message as { dataUrl?: unknown; seq?: number };
             const focused = document.hasFocus();
             let transient = false;
             try {
@@ -95,17 +95,22 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               chars: typeof dataUrl === "string" ? dataUrl.length : -1,
               focused,
               transientActivation: transient,
+              seq: typeof seq === "number" ? seq : "none",
             });
             try {
-              if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:image/")) {
-                sendResponse({ ok: false, error: "bad-image" });
+              if (typeof navigator.clipboard?.write !== "function") {
+                sendResponse({ ok: false, error: "clipboard-unavailable", focused, transientActivation: transient });
                 break;
               }
-              const blobPromise = fetch(dataUrl).then((res) => {
-                if (!res.ok) throw new Error("decode-failed");
-                return res.blob();
-              });
-              await navigator.clipboard.write([new ClipboardItem({ "image/png": blobPromise })]);
+              // Synchronous base64 decode — no fetch(), which page CSP can
+              // block on strict sites (a site-dependent intermittent failure).
+              const blob = dataUrlToBlob(dataUrl as string);
+              if (!claimCopySlot(seq)) {
+                console.debug("[ScreenX] COPY_IMAGE superseded by a newer copy — skipping write");
+                sendResponse({ ok: false, error: "superseded", focused, transientActivation: transient });
+                break;
+              }
+              await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
               console.debug("[ScreenX] COPY_IMAGE clipboard write ok=true");
               sendResponse({ ok: true, focused, transientActivation: transient });
             } catch (e) {

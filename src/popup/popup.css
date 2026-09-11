@@ -1,0 +1,34 @@
+/**
+ * Neobrutalism tokens — POPUP ONLY (imported by src/popup/main.tsx).
+ * Kept out of the shared index.css so editor/workspace/history are untouched.
+ *
+ * The 6 rules: thick black borders, hard shadows (never blur), sharp
+ * corners, 2–3 solid accents, bold type, 100ms tactile transitions.
+ */
+.nb-font-display {
+  font-family: "Bricolage Grotesque", "Public Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+.nb-card {
+  background: #ffffff;
+  border: 2px solid #000;
+  box-shadow: 4px 4px 0 #000;
+}
+
+/* Press-down for action rows: hover lifts, press lands where the shadow was. */
+.nb-press {
+  transition: transform 100ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 100ms cubic-bezier(0.4, 0, 0.2, 1),
+    background-color 100ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+.nb-press:hover {
+  transform: translate(-1px, -1px);
+  box-shadow: 5px 5px 0 #000;
+}
+.nb-press:active {
+  transform: translate(3px, 3px);
+  box-shadow: 1px 1px 0 #000;
+}
+.nb-press:disabled {
+  transform: none;
+  box-shadow: 4px 4px 0 #000;
+}

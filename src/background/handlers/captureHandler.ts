@@ -9,7 +9,8 @@
  */
 import { capture } from "@/capture";
 import { cancelPendingSelection } from "@/capture/selectedArea";
-import { encodeForClipboard, sendCopyImageReport } from "@/capture/clipboard";
+import { encodeForClipboard } from "@/capture/clipboard";
+import { attemptCopyWithFocus, readTab } from "./copyAttempt";
 import { getCapture } from "@/storage/idb";
 import { CaptureError } from "@/types/capture";
 import { sendToastToActiveTab, sendToastToTab } from "./commandHandler";
@@ -92,40 +93,6 @@ async function showChoiceToast(
   return { delivered: false };
 }
 
-/** Best-effort tab lookup for clipboard-target classification + focusing. */
-async function readTab(tabId: number): Promise<{ url?: string; windowId?: number }> {
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    return { url: tab?.url, windowId: tab?.windowId };
-  } catch {
-    return {};
-  }
-}
-
-/**
- * Focus assist for the clipboard write: activating the tab is NOT enough —
- * `tabs.update({active:true})` leaves a DevTools/another-window focus in
- * place and `document.hasFocus()` stays false. Focusing the WINDOW first is
- * what actually hands document focus back to the page.
- */
-async function focusTabForCopy(tabId: number, windowId?: number): Promise<void> {
-  try {
-    if (windowId !== undefined && typeof chrome.windows?.update === "function") {
-      await chrome.windows.update(windowId, { focused: true });
-    }
-  } catch {
-    // ignore — tab activation below is the fallback
-  }
-  try {
-    await chrome.tabs.update(tabId, { active: true });
-  } catch {
-    // Tab may be closed; the write will simply fail gracefully.
-  }
-}
-
-const COPY_ATTEMPT_SETTLES_MS = [150, 500, 1000];
-const COPY_ATTEMPT_TIMEOUT_MS = 2_000;
-
 export async function handleCapture(
   type: Parameters<typeof capture>[0],
   label: string
@@ -169,28 +136,11 @@ export async function handleCapture(
             ? "Clipboard needs a secure (https) page — use Download, or copy from the Editor."
             : "Clipboard isn't available on this page — use Download, or copy from the Editor.";
       } else {
-        // Bounded retries with real window focus: fast captures (visible)
-        // reach this point while popup-close focus is still settling, and
-        // tab-activation alone doesn't steal focus back from DevTools or
-        // another window. Retry ONLY when the tab reports unfocused (a
-        // timing race focus can still win); a focused refusal or structural
-        // error stops after the first attempt.
-        for (let attempt = 0; attempt < COPY_ATTEMPT_SETTLES_MS.length; attempt++) {
-          await focusTabForCopy(tabId, tab.windowId);
-          // Let the focus event propagate to the renderer before writing.
-          await new Promise<void>((r) => setTimeout(r, COPY_ATTEMPT_SETTLES_MS[attempt]!));
-          const report = await sendCopyImageReport(tabId, copyDataUrl, COPY_ATTEMPT_TIMEOUT_MS);
-          if (report.ok) {
-            copied = true;
-            break;
-          }
-          console.debug(
-            `[ScreenX] ${label} → clipboard attempt ${attempt + 1} failed:`,
-            report.error ?? "refused",
-            { focused: report.focused, transientActivation: report.transientActivation }
-          );
-          if (report.focused !== false) break;
-        }
+        // Shared attempt helper: real window focus + bounded retries (only
+        // on unfocused reports — a focused refusal stops after attempt one).
+        // attemptCopyWithFocus logs each attempt with this label.
+        const attempt = await attemptCopyWithFocus(tabId, copyDataUrl, tab.windowId, `${label} [${result.id}]`);
+        copied = attempt.copied;
         if (!copied) {
           copyNote = "Auto-copy missed (the tab wasn't focused) — tap Copy.";
         }

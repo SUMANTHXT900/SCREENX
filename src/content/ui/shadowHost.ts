@@ -111,26 +111,29 @@ export function ensureUiRoot(): ShadowRoot {
       max-width: calc(100vw - 48px);
       z-index: 20;
     }
-    /* Shared card language with the progress HUD: dark glass, hairline
-       border, soft depth. Toasts and HUD read as one family. */
+    /* Neobrutalist cards: cream paper, thick black borders, hard offset
+       shadows, sharp corners, max 3 solid accents (emerald/amber/red).
+       Toasts must read on ANY webpage, so no translucency here. */
     .toast-item {
-      background: rgba(15, 15, 17, 0.82);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
-      color: #fafafa;
-      border-radius: 16px;
-      border: 1px solid rgba(255, 255, 255, 0.09);
+      background: #FFFDF7;
+      color: #000;
+      border-radius: 0;
+      border: 3px solid #000;
       padding: 13px 14px;
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+      box-shadow: 6px 6px 0 #000;
       pointer-events: auto;
-      animation: toast-in 0.24s cubic-bezier(0.22, 1, 0.36, 1) forwards;
+      animation: toast-in 0.2s cubic-bezier(0.22, 1, 0.36, 1) forwards;
       min-width: 260px;
       font-size: 13px;
       line-height: 1.4;
       box-sizing: border-box;
     }
     .toast-item.closing {
-      animation: toast-out 0.18s ease-in forwards;
+      animation: toast-out 0.15s ease-in forwards;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .toast-item { animation: none; }
+      .toast-item.closing { animation: none; opacity: 0; }
     }
     .toast-top {
       display: flex;
@@ -139,22 +142,22 @@ export function ensureUiRoot(): ShadowRoot {
     }
     .toast-icon {
       flex-shrink: 0;
-      width: 32px;
-      height: 32px;
-      border-radius: 10px;
+      width: 34px;
+      height: 34px;
+      border-radius: 0;
       display: flex;
       align-items: center;
       justify-content: center;
-      background: linear-gradient(135deg, rgba(96,165,250,0.22), rgba(168,85,247,0.22));
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      background: #4ADE80;
+      border: 2px solid #000;
     }
     .toast-icon--ok {
-      background: rgba(34, 197, 94, 0.14);
-      border-color: rgba(34, 197, 94, 0.3);
+      background: #000;
+      border-color: #000;
     }
     .toast-icon--err {
-      background: rgba(239, 68, 68, 0.14);
-      border-color: rgba(239, 68, 68, 0.3);
+      background: #F87171;
+      border-color: #000;
     }
     .toast-head {
       flex: 1;
@@ -168,9 +171,9 @@ export function ensureUiRoot(): ShadowRoot {
       min-width: 0;
     }
     .toast-title {
-      font-weight: 600;
-      color: #fff;
-      font-size: 13.5px;
+      font-weight: 800;
+      color: #000;
+      font-size: 14px;
       letter-spacing: -0.01em;
       white-space: nowrap;
       overflow: hidden;
@@ -181,12 +184,16 @@ export function ensureUiRoot(): ShadowRoot {
       display: inline-flex;
       align-items: center;
       gap: 5px;
-      font-size: 10.5px;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      padding: 2px 8px;
-      border-radius: 9999px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      padding: 2px 8px 2px 7px;
+      border-radius: 0;
+      border: 2px solid #000;
       line-height: 1.5;
+      color: #000;
     }
     .toast-pill::before {
       content: "";
@@ -196,18 +203,15 @@ export function ensureUiRoot(): ShadowRoot {
       background: currentColor;
     }
     .toast-pill--green {
-      color: #4ade80;
-      background: rgba(34, 197, 94, 0.12);
-      border: 1px solid rgba(34, 197, 94, 0.25);
+      background: #4ADE80;
     }
     .toast-pill--amber {
-      color: #fbbf24;
-      background: rgba(251, 191, 36, 0.1);
-      border: 1px solid rgba(251, 191, 36, 0.25);
+      background: #FBBF24;
     }
     .toast-message {
-      color: #a1a1aa;
+      color: rgba(0, 0, 0, 0.65);
       font-size: 12.5px;
+      font-weight: 500;
       margin-top: 5px;
       word-break: break-word;
     }
@@ -220,10 +224,10 @@ export function ensureUiRoot(): ShadowRoot {
       flex-shrink: 0;
       width: 64px;
       height: 64px;
-      border-radius: 12px;
+      border-radius: 0;
       object-fit: cover;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: rgba(255, 255, 255, 0.04);
+      border: 2px solid #000;
+      background: #fff;
     }
     .toast-actions {
       display: flex;
@@ -238,48 +242,94 @@ export function ensureUiRoot(): ShadowRoot {
       align-items: center;
       justify-content: center;
       gap: 7px;
-      border-radius: 10px;
+      border-radius: 0;
       padding: 9px 12px;
       font-size: 13px;
-      font-weight: 600;
+      font-weight: 700;
       font-family: inherit;
       letter-spacing: -0.005em;
       cursor: pointer;
-      border: 1px solid transparent;
-      transition: filter 0.15s ease, background 0.15s ease, transform 0.05s ease;
+      border: 2px solid #000;
+      box-shadow: 3px 3px 0 #000;
+      transition: transform 100ms cubic-bezier(0.4, 0, 0.2, 1), box-shadow 100ms cubic-bezier(0.4, 0, 0.2, 1), background-color 100ms cubic-bezier(0.4, 0, 0.2, 1);
     }
-    .toast-btn:active { transform: scale(0.98); }
+    .toast-btn:active { transform: translate(2px, 2px); box-shadow: 1px 1px 0 #000; }
+    .toast-btn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
     .toast-btn svg { flex-shrink: 0; }
     .toast-btn-primary {
-      background: linear-gradient(135deg, #3b82f6, #8b5cf6);
-      color: #fff;
+      background: #4ADE80;
+      color: #000;
       width: 100%;
-      box-shadow: 0 4px 14px rgba(99, 102, 241, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.18);
     }
-    .toast-btn-primary:hover { filter: brightness(1.12); }
+    .toast-btn-primary:hover { background: #22c55e; }
     .toast-btn-secondary {
-      background: rgba(255, 255, 255, 0.06);
-      color: #fafafa;
-      border-color: rgba(255, 255, 255, 0.09);
+      background: #fff;
+      color: #000;
       flex: 1;
-      font-weight: 500;
+      font-weight: 700;
     }
-    .toast-btn-secondary:hover { background: rgba(255, 255, 255, 0.1); }
+    .toast-btn-secondary:hover { background: #000; color: #fff; }
     .toast-close-btn {
-      background: none;
-      border: none;
-      color: #71717a;
+      background: #fff;
+      border: 2px solid #000;
+      color: #000;
       cursor: pointer;
-      padding: 4px;
+      padding: 3px;
       margin: -2px -4px 0 0;
-      border-radius: 6px;
+      border-radius: 0;
       display: flex;
       align-items: center;
       justify-content: center;
       outline: none;
       flex-shrink: 0;
     }
-    .toast-close-btn:hover { background: rgba(255, 255, 255, 0.08); color: #fff; }
+    .toast-close-btn:hover { background: #EF4444; border-color: #000; color: #fff; }
+    .toast-close-btn:active { transform: translate(1px, 1px); }
+    .toast-close-btn:focus-visible { outline: 2px solid #000; outline-offset: 2px; }
+    /* 30s idle countdown: a square ring hugging the X button — same
+       brutalist geometry as the button itself (sharp, black, offset). */
+    .toast-timer {
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      width: 32px;
+      height: 32px;
+      margin: -5px -9px -5px 0;
+    }
+    .toast-timer-ring {
+      position: absolute;
+      inset: 0;
+      overflow: visible;
+      /* Critical: the ring overlays the X button — without this it swallows
+         every hover/click and the button feels dead. */
+      pointer-events: none;
+    }
+    .toast-timer-track {
+      fill: none;
+      stroke: rgba(0, 0, 0, 0.14);
+      stroke-width: 2.5;
+    }
+    .toast-timer-fill {
+      fill: none;
+      stroke: #000;
+      stroke-width: 2.5;
+    }
+    .toast-timer .toast-close-btn {
+      margin: 0;
+    }
+    /* Button busy state (Copying… / Saving…): dimmed but alive. */
+    .toast-btn:disabled {
+      cursor: wait;
+      opacity: 0.75;
+    }
+    .toast-spinner {
+      animation: __sxSpin 0.8s linear infinite;
+    }
+    @keyframes __sxSpin {
+      to { transform: rotate(360deg); }
+    }
     
     @keyframes toast-in {
       from { transform: translateY(-12px) scale(0.98); opacity: 0; }

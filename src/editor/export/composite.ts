@@ -24,7 +24,10 @@ export function offsetShapes(shapes: Shape[], dx: number, dy: number): Shape[] {
         return { ...s, x1: s.x1 + dx, y1: s.y1 + dy, x2: s.x2 + dx, y2: s.y2 + dy };
       case "text":
         return { ...s, x: s.x + dx, y: s.y + dy };
+      case "badge":
+        return { ...s, x: s.x + dx, y: s.y + dy };
       case "pencil":
+      case "highlight":
         return { ...s, points: s.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
     }
   });
@@ -97,7 +100,9 @@ export function renderStackedComposite(
 
   let y = 0;
   for (const img of images) {
-    ctx.drawImage(img, 0, y, img.naturalWidth, img.naturalHeight);
+    // Center narrower parts (widths can differ by a pixel after DPR math).
+    const x = Math.max(0, Math.round((width - img.naturalWidth) / 2));
+    ctx.drawImage(img, x, y, img.naturalWidth, img.naturalHeight);
     y += img.naturalHeight;
   }
   paintShapes(ctx, shapes, 0, 0, () => {
@@ -156,14 +161,52 @@ function paintShapes(
         ctx.moveTo(s.points[0]!.x + ox, s.points[0]!.y + oy);
         for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i]!.x + ox, s.points[i]!.y + oy);
         ctx.stroke();
+      } else if (s.points.length === 1) {
+        // Single-sample dot (round caps render zero-length strokes as dots).
+        ctx.beginPath();
+        ctx.arc(s.points[0]!.x + ox, s.points[0]!.y + oy, s.strokeWidth / 2, 0, Math.PI * 2);
+        ctx.fill();
       }
+    } else if (s.kind === "highlight") {
+      ctx.save();
+      ctx.globalAlpha = 0.45;
+      if (s.points.length > 1) {
+        ctx.beginPath();
+        ctx.moveTo(s.points[0]!.x + ox, s.points[0]!.y + oy);
+        for (let i = 1; i < s.points.length; i++) ctx.lineTo(s.points[i]!.x + ox, s.points[i]!.y + oy);
+        ctx.lineWidth = s.width;
+        ctx.stroke();
+      } else if (s.points.length === 1) {
+        ctx.beginPath();
+        ctx.arc(s.points[0]!.x + ox, s.points[0]!.y + oy, s.width / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    } else if (s.kind === "badge") {
+      const r = Math.max(14, s.fontSize * 0.72);
+      ctx.beginPath();
+      ctx.arc(s.x + ox, s.y + oy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.lineWidth = Math.max(2, r / 7);
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = `800 ${s.fontSize}px ui-sans-serif, system-ui, sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(String(s.n), s.x + ox, s.y + oy + 1);
     } else if (s.kind === "text") {
       ctx.font = `700 ${s.fontSize}px ui-sans-serif, system-ui, sans-serif`;
       ctx.lineWidth = Math.max(1, s.fontSize / 10);
       ctx.strokeStyle = "rgba(255,255,255,0.85)";
-      ctx.strokeText(s.text, s.x + ox, s.y + oy);
       ctx.fillStyle = s.color;
-      ctx.fillText(s.text, s.x + ox, s.y + oy);
+      const lines = s.text.split("\n");
+      const lh = s.fontSize * 1.2;
+      lines.forEach((ln, i) => {
+        const ly = s.y + oy + i * lh;
+        ctx.strokeText(ln, s.x + ox, ly);
+        ctx.fillText(ln, s.x + ox, ly);
+      });
     }
     ctx.restore();
   }

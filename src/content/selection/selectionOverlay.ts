@@ -24,7 +24,7 @@ let styleEl: HTMLStyleElement | null = null;
 let reviewBar: HTMLDivElement | null = null;
 let cornerXBtn: HTMLButtonElement | null = null;
 
-const ACCENT = "#3b82f6";
+const ACCENT = "#4ADE80";
 
 const DIM_CSS = `
   position: fixed;
@@ -40,7 +40,7 @@ const BOX_CSS = `
   position: fixed;
   display: none;
   border: 1.5px solid ${ACCENT};
-  background: rgba(59,130,246,0.07);
+  background: rgba(74,222,128,0.08);
   box-shadow: 0 0 0 9999px rgba(8,8,10,0.55);
   pointer-events: none;
   z-index: 2;
@@ -62,10 +62,10 @@ const HANDLE_CSS = `
   transform: translateX(-50%);
   width: 88px;
   height: 28px;
-  border-radius: 9999px;
-  background: linear-gradient(180deg, #60a5fa, #2563eb);
-  border: 2px solid #ffffff;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  border-radius: 0;
+  background: #4ADE80;
+  border: 2px solid #000;
+  box-shadow: 3px 3px 0 #000;
   cursor: ns-resize;
   pointer-events: auto;
   display: none;
@@ -78,10 +78,10 @@ const HANDLE_TOP_CSS = `
   transform: translateX(-50%);
   width: 88px;
   height: 28px;
-  border-radius: 9999px;
-  background: linear-gradient(180deg, #60a5fa, #2563eb);
-  border: 2px solid #ffffff;
-  box-shadow: 0 2px 12px rgba(0,0,0,0.5);
+  border-radius: 0;
+  background: #4ADE80;
+  border: 2px solid #000;
+  box-shadow: 3px 3px 0 #000;
   cursor: ns-resize;
   pointer-events: auto;
   display: none;
@@ -92,7 +92,7 @@ const HANDLE_CHEVRON_UP_CSS = `
   height: 0;
   border-left: 5px solid transparent;
   border-right: 5px solid transparent;
-  border-bottom: 6px solid rgba(255,255,255,0.95);
+  border-bottom: 6px solid #000;
   pointer-events: none;
 `;
 
@@ -110,7 +110,7 @@ const HANDLE_DOT_CSS = `
   width: 4px;
   height: 4px;
   border-radius: 9999px;
-  background: rgba(255,255,255,0.9);
+  background: #000;
   pointer-events: none;
 `;
 
@@ -120,15 +120,15 @@ const HINT_CSS = `
   left: 50%;
   transform: translateX(-50%);
   z-index: 3;
-  background: rgba(24,24,27,0.92);
-  backdrop-filter: blur(8px);
-  color: #fafafa;
+  background: #FFFDF7;
+  color: #000;
   padding: 10px 16px;
-  border-radius: 14px;
-  border: 1px solid rgba(255,255,255,0.1);
-  box-shadow: 0 12px 32px rgba(0,0,0,0.45);
+  border-radius: 0;
+  border: 3px solid #000;
+  box-shadow: 5px 5px 0 #000;
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
   font-size: 13px;
+  font-weight: 600;
   line-height: 1.5;
   text-align: center;
   pointer-events: none;
@@ -140,24 +140,23 @@ const LABEL_CSS = `
   position: fixed;
   display: none;
   z-index: 3;
-  background: rgba(24,24,27,0.92);
-  backdrop-filter: blur(8px);
-  color: #ffffff;
-  border: 1px solid rgba(255,255,255,0.14);
+  background: #000;
+  color: #4ADE80;
+  border: 2px solid #000;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 700;
   padding: 3px 9px;
-  border-radius: 9999px;
+  border-radius: 0;
   white-space: nowrap;
   pointer-events: none;
-  box-shadow: 0 2px 10px rgba(0,0,0,0.4);
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.55);
 `;
 
 const GUIDE_CSS = `
   position: fixed;
   display: none;
-  background-image: linear-gradient(to right, rgba(96,165,250,0.65) 55%, transparent 45%);
+  background-image: linear-gradient(to right, rgba(74,222,128,0.8) 55%, transparent 45%);
   background-size: 9px 1px;
   background-repeat: repeat-x;
   pointer-events: none;
@@ -170,14 +169,15 @@ const CORNER_X_CSS = `
   position: fixed;
   top: 16px;
   right: 16px;
-  width: 32px;
-  height: 32px;
-  border-radius: 9999px;
-  background: rgba(24,24,27,0.92);
-  border: 1px solid rgba(255,255,255,0.14);
-  color: #a1a1aa;
+  width: 34px;
+  height: 34px;
+  border-radius: 0;
+  background: #FFFDF7;
+  border: 2px solid #000;
+  color: #000;
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
   font-size: 15px;
+  font-weight: 800;
   line-height: 1;
   cursor: pointer;
   pointer-events: auto;
@@ -185,7 +185,7 @@ const CORNER_X_CSS = `
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  box-shadow: 3px 3px 0 #000;
 `;
 
 const REVIEW_BAR_CSS = `
@@ -194,39 +194,42 @@ const REVIEW_BAR_CSS = `
   align-items: center;
   gap: 8px;
   z-index: 5;
-  background: rgba(24,24,27,0.94);
-  border: 1px solid rgba(255,255,255,0.12);
+  background: #FFFDF7;
+  border: 3px solid #000;
   padding: 8px;
   padding-left: 14px;
-  border-radius: 14px;
-  box-shadow: 0 12px 32px rgba(0,0,0,0.5);
+  border-radius: 0;
+  box-shadow: 5px 5px 0 #000;
   font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
   font-size: 13px;
-  color: #fafafa;
+  font-weight: 600;
+  color: #000;
   pointer-events: auto;
   white-space: nowrap;
   animation: __sxSlideDown 0.18s ease-out;
 `;
 
 const REVIEW_BTN_PRIMARY_CSS = `
-  background: #22c55e;
-  color: #ffffff;
-  border: none;
+  background: #000;
+  color: #fff;
+  border: 2px solid #000;
+  box-shadow: 3px 3px 0 rgba(0,0,0,0.35);
   padding: 8px 16px;
-  border-radius: 10px;
-  font-weight: 600;
+  border-radius: 0;
+  font-weight: 800;
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
 `;
 
 const REVIEW_BTN_GHOST_CSS = `
-  background: transparent;
-  color: #e4e4e7;
-  border: 1px solid rgba(255,255,255,0.18);
+  background: #fff;
+  color: #000;
+  border: 2px solid #000;
+  box-shadow: 3px 3px 0 #000;
   padding: 8px 14px;
-  border-radius: 10px;
-  font-weight: 500;
+  border-radius: 0;
+  font-weight: 700;
   font-size: 13px;
   font-family: inherit;
   cursor: pointer;
@@ -249,8 +252,8 @@ const KEYFRAMES_CSS = `
     50% { margin-bottom: 7px; }
   }
   @keyframes __sxHandleGlow {
-    0%, 100% { box-shadow: 0 2px 12px rgba(0,0,0,0.5), 0 0 0 0 rgba(59,130,246,0.55); }
-    50% { box-shadow: 0 2px 12px rgba(0,0,0,0.5), 0 0 0 9px rgba(59,130,246,0); }
+    0%, 100% { box-shadow: 3px 3px 0 #000, 0 0 0 0 rgba(74,222,128,0.6); }
+    50% { box-shadow: 3px 3px 0 #000, 0 0 0 9px rgba(74,222,128,0); }
   }
   .__sx-handle-pulse {
     animation: __sxHandleBounce 1.15s ease-in-out infinite, __sxHandleGlow 1.6s ease-out infinite !important;
@@ -312,7 +315,7 @@ export function mountOverlay(onCancel: () => void): OverlayRefs {
     height: 0;
     border-left: 5px solid transparent;
     border-right: 5px solid transparent;
-    border-top: 6px solid rgba(255,255,255,0.95);
+    border-top: 6px solid #000;
     pointer-events: none;
   `;
   grip.appendChild(chevron);
@@ -337,7 +340,7 @@ export function mountOverlay(onCancel: () => void): OverlayRefs {
   label.style.cssText = LABEL_CSS;
 
   const guideV = document.createElement("div");
-  guideV.style.cssText = `${GUIDE_CSS} top: 0; bottom: 0; width: 1px; background-image: linear-gradient(to bottom, rgba(96,165,250,0.65) 55%, transparent 45%); background-size: 1px 9px; background-repeat: repeat-y;`;
+  guideV.style.cssText = `${GUIDE_CSS} top: 0; bottom: 0; width: 1px; background-image: linear-gradient(to bottom, rgba(74,222,128,0.8) 55%, transparent 45%); background-size: 1px 9px; background-repeat: repeat-y;`;
 
   const guideH = document.createElement("div");
   guideH.style.cssText = `${GUIDE_CSS} left: 0; right: 0; height: 1px;`;
@@ -465,37 +468,39 @@ export function setOverlayStage(r: OverlayRefs, stage: SelectionStage, trailing?
       justify-content: center;
       width: 18px;
       height: 18px;
-      border-radius: 9999px;
+      border-radius: 0;
       font-size: 11px;
-      font-weight: 700;
+      font-weight: 800;
       margin-right: 6px;
       vertical-align: -4px;
-      background: ${done ? "#22c55e" : active ? ACCENT : "#3f3f46"};
-      color: #ffffff;
+      background: ${done ? "#000" : active ? ACCENT : "#fff"};
+      color: ${done ? "#4ADE80" : active ? "#000" : "rgba(0,0,0,0.45)"};
+      border: 2px solid #000;
     `;
     dot.textContent = done ? "✓" : String(n);
     const text = document.createElement("span");
-    text.style.cssText = `color: ${active ? "#ffffff" : "#a1a1aa"}; font-weight: ${active ? "600" : "400"}; margin-right: 14px;`;
+    text.style.cssText = `color: ${active ? "#000" : "rgba(0,0,0,0.5)"}; font-weight: ${active ? "800" : "500"}; margin-right: 14px;`;
     text.textContent = label;
     r.hint.append(dot, text);
   });
   if (trailing) {
     const t = document.createElement("div");
-    t.style.cssText = "margin-top: 5px; font-size: 12px; color: #a1a1aa;";
+    t.style.cssText = "margin-top: 5px; font-size: 12px; color: rgba(0,0,0,0.6);";
     t.textContent = trailing;
     r.hint.append(t);
   }
   const esc = document.createElement("div");
-  esc.style.cssText = "margin-top: 6px; font-size: 11px; color: #71717a;";
+  esc.style.cssText = "margin-top: 6px; font-size: 11px; color: rgba(0,0,0,0.55);";
   esc.textContent = "Press ";
   const key = document.createElement("span");
   key.style.cssText = `
-    background: #27272a;
-    border: 1px solid rgba(255,255,255,0.12);
+    background: #fff;
+    border: 2px solid #000;
     padding: 1px 7px;
-    border-radius: 6px;
-    font-weight: 600;
-    color: #e4e4e7;
+    border-radius: 0;
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #000;
   `;
   key.textContent = "Esc";
   esc.append(key, " to cancel anytime");
@@ -508,10 +513,11 @@ export function setOverlayHint(r: OverlayRefs, message: string): void {
   r.hint.append(message + "  ·  ");
   const key = document.createElement("span");
   key.style.cssText = `
-    background: #27272a;
+    background: #fff;
+    border: 2px solid #000;
     padding: 2px 6px;
-    border-radius: 6px;
-    font-weight: 600;
+    border-radius: 0;
+    font-weight: 700;
   `;
   key.textContent = "Esc";
   r.hint.append(key, " to cancel");
@@ -566,7 +572,7 @@ export function setOverlayBusy(r: OverlayRefs, message: string): void {
     width: 8px;
     height: 8px;
     border-radius: 9999px;
-    background: #3b82f6;
+    background: #000;
     display: inline-block;
     animation: __sxHandleGlow 1.2s ease-out infinite;
   `;
@@ -610,7 +616,7 @@ export function showReviewBar(
   bar.style.cssText = REVIEW_BAR_CSS;
 
   const label = document.createElement("span");
-  label.style.cssText = "color: #a1a1aa; padding-right: 4px;";
+  label.style.cssText = "color: rgba(0,0,0,0.65); padding-right: 4px; font-weight: 700;";
   label.textContent = box
     ? `${Math.round(box.width)} × ${Math.round(box.height)}`
     : "Review selection";

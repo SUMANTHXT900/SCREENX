@@ -61,7 +61,9 @@ async function rawCopySend(tabId: number, dataUrl: string, timeoutMs: number): P
   const response = (await new Promise<unknown>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("copy-timeout")), timeoutMs);
     try {
-      chrome.tabs.sendMessage(tabId, { type: "SCREENX_COPY_IMAGE", dataUrl }, (res) => {
+      // seq orders concurrent captures: the content script drops any write
+      // older than the newest it has seen (see claimCopySlot).
+      chrome.tabs.sendMessage(tabId, { type: "SCREENX_COPY_IMAGE", dataUrl, seq: Date.now() }, (res) => {
         clearTimeout(timer);
         const err = chrome.runtime.lastError;
         if (err) reject(new Error(err.message ?? "send-failed"));

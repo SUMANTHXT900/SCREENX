@@ -22,6 +22,8 @@ export interface RectShape extends ShapeBase {
   y: number;
   w: number;
   h: number;
+  /** Solid fill (color) or null for outline only. */
+  fill: string | null;
 }
 
 export interface EllipseShape extends ShapeBase {
@@ -30,6 +32,8 @@ export interface EllipseShape extends ShapeBase {
   y: number;
   w: number;
   h: number;
+  /** Solid fill (color) or null for outline only. */
+  fill: string | null;
 }
 
 export interface ArrowShape extends ShapeBase {
@@ -53,6 +57,22 @@ export interface PencilShape extends ShapeBase {
   points: Point[];
 }
 
+export interface HighlightShape extends ShapeBase {
+  kind: "highlight";
+  points: Point[];
+  /** Rendered stroke width (derived from strokeWidth at creation). */
+  width: number;
+}
+
+export interface BadgeShape extends ShapeBase {
+  kind: "badge";
+  x: number;
+  y: number;
+  /** Step number (auto-incremented at placement). */
+  n: number;
+  fontSize: number;
+}
+
 export interface BlurShape extends ShapeBase {
   kind: "blur";
   x: number;
@@ -61,7 +81,7 @@ export interface BlurShape extends ShapeBase {
   h: number;
 }
 
-export type Shape = RectShape | EllipseShape | ArrowShape | TextShape | PencilShape | BlurShape;
+export type Shape = RectShape | EllipseShape | ArrowShape | TextShape | PencilShape | HighlightShape | BadgeShape | BlurShape;
 
 export interface CropRect {
   x: number;
@@ -83,6 +103,8 @@ interface EditorStore {
   color: string;
   strokeWidth: number;
   fontSize: number;
+  /** New rects/ellipses start filled with the current color. */
+  fillNext: boolean;
   shapes: Shape[];
   past: Shape[][];
   future: Shape[][];
@@ -92,11 +114,17 @@ interface EditorStore {
   setColor: (c: string) => void;
   setStrokeWidth: (w: number) => void;
   setFontSize: (s: number) => void;
+  setFillNext: (on: boolean) => void;
   select: (id: string | null) => void;
   commit: (next: Shape[]) => void;
   /** Add a fully-formed shape (build id via newId(), colors from the store). */
   addShape: (s: Shape) => void;
   updateShape: (id: string, patch: Partial<Shape>) => void;
+  /**
+   * Restyle the SELECTED shape (color/stroke/font) WITH undo history.
+   * No-op when nothing is selected — callers fall back to the defaults.
+   */
+  restyleSelected: (patch: Partial<Shape>) => void;
   deleteSelected: () => void;
   undo: () => void;
   redo: () => void;
@@ -112,6 +140,7 @@ export const useEditorStore = create<EditorStore>()((set) => ({
   color: "#ef4444",
   strokeWidth: 4,
   fontSize: 28,
+  fillNext: false,
   shapes: [],
   past: [],
   future: [],
@@ -121,6 +150,7 @@ export const useEditorStore = create<EditorStore>()((set) => ({
   setColor: (c) => set({ color: c }),
   setStrokeWidth: (w) => set({ strokeWidth: w }),
   setFontSize: (s) => set({ fontSize: s }),
+  setFillNext: (on) => set({ fillNext: on }),
   select: (id) => set({ selectedId: id }),
   commit: (next) =>
     set((st) => ({
@@ -139,6 +169,16 @@ export const useEditorStore = create<EditorStore>()((set) => ({
     set((st) => ({
       shapes: st.shapes.map((sh) => (sh.id === id ? ({ ...sh, ...patch } as Shape) : sh)),
     })),
+  restyleSelected: (patch) =>
+    set((st) => {
+      if (!st.selectedId) return st;
+      if (!st.shapes.some((sh) => sh.id === st.selectedId)) return st;
+      return {
+        shapes: st.shapes.map((sh) => (sh.id === st.selectedId ? ({ ...sh, ...patch } as Shape) : sh)),
+        past: [...st.past.slice(-(CAP - 1)), st.shapes],
+        future: [],
+      };
+    }),
   deleteSelected: () =>
     set((st) => {
       if (!st.selectedId) return st;

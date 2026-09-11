@@ -1,7 +1,5 @@
 import * as React from "react";
-import { Monitor, Scan, ScrollText, Clock, Library, Sparkles, Loader2, AlertCircle, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Separator } from "@/components/ui/separator";
+import { Monitor, Scan, ScrollText, Clock, Library, Crop, Loader2, AlertCircle, X } from "lucide-react";
 import { CaptureError, type CaptureType } from "@/types";
 import { CONTENT_PROTOCOL_VERSION } from "@/messaging/events";
 
@@ -22,7 +20,7 @@ const CAPTURE_OPTIONS = [
     icon: Monitor,
     shortcut: "Alt ⇧ V",
     enabled: true,
-    tile: "bg-gradient-to-br from-blue-500 to-violet-600 text-white shadow-[0_4px_14px_rgba(99,102,241,0.4)]",
+    tile: "bg-[#4ADE80]",
   },
   {
     id: "full-page" as const,
@@ -31,7 +29,7 @@ const CAPTURE_OPTIONS = [
     icon: ScrollText,
     shortcut: "Alt ⇧ F",
     enabled: true,
-    tile: "bg-white/[0.07] text-zinc-100 ring-1 ring-white/10",
+    tile: "bg-[#FBBF24]",
   },
   {
     id: "selected-area" as const,
@@ -40,7 +38,7 @@ const CAPTURE_OPTIONS = [
     icon: Scan,
     shortcut: "Alt ⇧ S",
     enabled: true,
-    tile: "bg-gradient-to-br from-violet-500 to-fuchsia-600 text-white shadow-[0_4px_14px_rgba(168,85,247,0.4)]",
+    tile: "bg-[#60A5FA]",
   },
 ] as const;
 
@@ -114,67 +112,36 @@ export default function App(): React.JSX.Element {
     [isCapturing]
   );
 
-  const statusLabel =
-    capturingType === "selected-area"
-      ? "SELECTING…"
-      : capturingType === "full-page"
-        ? "CAPTURING FULL PAGE…"
-        : "CAPTURING…";
-
   return (
-    <div className="relative w-[360px] overflow-hidden bg-[#0b0b0d] text-zinc-100 antialiased">
-      {/* Ambient top glow — same family as the HUD gradient */}
-      <div
-        aria-hidden="true"
-        className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-indigo-500/[0.14] via-violet-500/[0.05] to-transparent"
-      />
-
+    <div className="w-[360px] bg-[#FFF6E9] font-['Public_Sans',ui-sans-serif,system-ui,sans-serif] text-black antialiased">
       {/* Header */}
-      <div className="relative px-4 pb-3 pt-4">
+      <div className="px-4 pb-3 pt-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-[10px] bg-gradient-to-br from-blue-500 to-violet-600 text-white shadow-[0_4px_14px_rgba(99,102,241,0.45)]">
-              <Sparkles className="h-4 w-4" strokeWidth={1.75} />
+            <div className="flex h-10 w-10 items-center justify-center border-2 border-black bg-black text-white shadow-[3px_3px_0_#000]">
+              <Crop className="h-5 w-5" strokeWidth={2.25} />
             </div>
             <div className="leading-none">
-              <div className="text-[14.5px] font-semibold tracking-tight text-white">ScreenX</div>
-              <div className="mt-1 text-[10px] font-semibold tracking-[0.14em] text-zinc-500">
-                CAPTURE STUDIO
+              <div className="nb-font-display text-[19px] font-extrabold tracking-tight">
+                ScreenX
+              </div>
+              <div className="mt-1 font-mono text-[10px] font-medium text-black/60">
+                v0.1.1-redcross · proto {CONTENT_PROTOCOL_VERSION}
               </div>
             </div>
           </div>
-          <span
-            className="rounded-full bg-white/[0.06] px-2 py-1 font-mono text-[10px] tracking-wide text-zinc-400 ring-1 ring-white/10"
-            title="Content-protocol version — must match the tab's console '[ScreenX] content script loaded · proto N'"
-          >
-            v0.1.0 • proto {CONTENT_PROTOCOL_VERSION}
-          </span>
         </div>
-        <p className="mt-2.5 text-[12.5px] leading-[1.5] text-zinc-400">
-          Visible, Full-page &amp; Cross-scroll range ready.
-        </p>
       </div>
 
-      <Separator className="bg-white/[0.07]" />
+      <div aria-hidden="true" className="h-0.5 bg-black" />
 
       {/* Capture */}
-      <div className="relative px-3 py-3">
-        <div className="mb-2 flex items-center justify-between px-1">
-          <span className="text-[11px] font-semibold tracking-[0.12em] text-zinc-500">CAPTURE</span>
-          {isCapturing ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-amber-400/25 bg-amber-400/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-amber-300">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              {statusLabel}
-            </span>
-          ) : (
-            <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-400/25 bg-emerald-400/10 px-2 py-0.5 text-[10px] font-semibold tracking-wide text-emerald-300">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-              READY
-            </span>
-          )}
+      <div className="px-4 py-4">
+        <div className="nb-font-display mb-2.5 text-[15px] font-extrabold tracking-tight">
+          Capture
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-3">
           {CAPTURE_OPTIONS.map((opt) => {
             const isThisCapturing = isCapturing && capturingType === opt.id;
             const sub = isThisCapturing
@@ -198,132 +165,107 @@ export default function App(): React.JSX.Element {
                       ? "Capture the entire page (Alt+Shift+F)"
                       : "Capture a cross-scroll range (Alt+Shift+S)"
                 }
-                className="group flex w-full items-center gap-3 rounded-2xl bg-white/[0.04] px-3 py-[10px] text-left ring-1 ring-white/10 transition-all hover:bg-white/[0.07] hover:ring-white/20 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70"
+                className="nb-card nb-press flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 text-left disabled:cursor-not-allowed disabled:opacity-70"
               >
-                <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] ${opt.tile}`}>
+                <div
+                  className={`flex h-10 w-10 shrink-0 items-center justify-center border-2 border-black ${opt.tile}`}
+                >
                   {isThisCapturing ? (
-                    <Loader2 className="h-4 w-4 animate-spin" strokeWidth={1.7} />
+                    <Loader2 className="h-5 w-5 animate-spin text-black" strokeWidth={2.25} />
                   ) : (
-                    <opt.icon className="h-4 w-4" strokeWidth={1.7} />
+                    <opt.icon className="h-5 w-5 text-black" strokeWidth={2.25} />
                   )}
                 </div>
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-[13px] font-medium leading-none text-white">{opt.label}</span>
-                    <span
-                      className={`inline-flex h-1.5 w-1.5 rounded-full ${
-                        isThisCapturing ? "bg-amber-400" : "bg-emerald-400"
-                      }`}
-                    />
+                  <div className="text-[15px] font-bold leading-tight">{opt.label}</div>
+                  <div className="mt-0.5 text-[12px] font-medium leading-tight text-black/60">
+                    {sub}
                   </div>
-                  <div className="mt-1 text-[11.5px] leading-none text-zinc-400">{sub}</div>
                 </div>
-                <div className="hidden shrink-0 flex-col items-end gap-1 sm:flex">
-                  <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 font-mono text-[10px] leading-none text-zinc-400 ring-1 ring-white/10">
-                    {opt.shortcut}
-                  </span>
-                  <span
-                    className={`text-[10px] font-semibold tracking-wide ${
-                      isThisCapturing ? "text-amber-300" : "text-emerald-300/80"
-                    }`}
-                  >
-                    {isThisCapturing ? "…" : "READY"}
-                  </span>
-                </div>
+                <span className="hidden shrink-0 border-2 border-black bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none shadow-[2px_2px_0_#000] sm:inline">
+                  {opt.shortcut}
+                </span>
               </button>
             );
           })}
         </div>
 
         {error && (
-          <div className="mt-2.5 flex items-start gap-2 rounded-xl border border-red-500/25 bg-red-500/10 px-3 py-2.5 text-[12px] leading-snug text-red-200">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+          <div className="mt-3 flex items-start gap-2 border-2 border-black bg-[#F87171] px-3 py-2.5 text-[12.5px] font-medium leading-snug shadow-[4px_4px_0_#000]">
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-black" strokeWidth={2.25} />
             <span className="min-w-0 flex-1">{error}</span>
             <button
               onClick={() => setError(null)}
-              className="shrink-0 rounded-md p-1 text-red-300/70 hover:bg-red-500/20 hover:text-red-200"
+              className="shrink-0 cursor-pointer border-2 border-black bg-white p-0.5 hover:bg-black hover:text-white"
               aria-label="Dismiss error"
             >
-              <X className="h-3.5 w-3.5" />
+              <X className="h-3.5 w-3.5" strokeWidth={2.5} />
             </button>
           </div>
         )}
 
-        <div className="mt-2.5 rounded-xl border border-dashed border-white/10 bg-white/[0.03] px-3 py-2">
-          <p className="text-[11.5px] leading-snug text-zinc-500">
-            <span className="font-medium text-zinc-300">Popup</span> and shortcuts share{" "}
-            <code className="rounded bg-white/[0.06] px-1 py-0.5 font-mono text-[10px] text-zinc-300 ring-1 ring-white/10">
-              capture("visible") / "full-page" / "selected-area"
-            </code>{" "}
-            . Selected area: drag a box, pull the handle down, release (Esc cancels).
-          </p>
-        </div>
-      </div>
-
-      <Separator className="bg-white/[0.07]" />
-
-      {/* Library */}
-      <div className="relative px-3 py-3">
-        <div className="mb-2 px-1 text-[11px] font-semibold tracking-[0.12em] text-zinc-500">LIBRARY</div>
-
         {isCapturing && capturingType !== "selected-area" && (
-          <div className="mb-2 flex items-start gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 px-3 py-2 text-[11.5px] leading-snug text-amber-200">
-            <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" />
+          <div className="mt-3 flex items-start gap-2 border-2 border-black bg-[#FBBF24] px-3 py-2 text-[12px] font-medium leading-snug shadow-[4px_4px_0_#000]">
+            <Loader2 className="mt-0.5 h-3.5 w-3.5 shrink-0 animate-spin" strokeWidth={2.5} />
             <span>
-              Capture in progress — <span className="font-medium">stay on this tab</span> until it
+              Capture in progress — <span className="font-bold">stay on this tab</span> until it
               finishes. Switching tabs stops the capture.
             </span>
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-2">
-          <Button
-            variant="outline"
-            className="h-auto flex-col items-start gap-1.5 rounded-2xl border-white/10 bg-white/[0.04] px-3 py-3 text-left text-zinc-100 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+        <div className="mt-3 border-2 border-dashed border-black/40 px-3 py-2">
+          <p className="text-[12px] font-medium leading-snug text-black/70">
+            Selected area: drag a box, pull the handle down, release (Esc cancels).
+          </p>
+        </div>
+      </div>
+
+      <div aria-hidden="true" className="h-0.5 bg-black" />
+
+      {/* Library */}
+      <div className="px-4 py-4">
+        <div className="nb-font-display mb-2.5 text-[15px] font-extrabold tracking-tight">
+          Library
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <button
+            className="nb-card nb-press flex h-auto cursor-pointer flex-col items-start gap-1.5 px-3 py-3 text-left text-black disabled:cursor-not-allowed disabled:opacity-70"
             onClick={() => openExtensionPage("workspace.html")}
             disabled={isCapturing}
             title={isCapturing ? "Wait for the capture to finish" : "Open workspace"}
           >
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-violet-600 text-white">
-              <Library className="h-3.5 w-3.5" />
+            <span className="flex h-8 w-8 items-center justify-center border-2 border-black bg-black text-white">
+              <Library className="h-4 w-4" strokeWidth={2.25} />
             </span>
-            <span className="text-[13px] font-medium leading-none">Workspace</span>
-            <span className="text-[11px] font-normal leading-none text-zinc-500">Saved items • 0</span>
-          </Button>
+            <span className="text-[14px] font-bold leading-none">Workspace</span>
+            <span className="font-mono text-[10.5px] font-medium leading-none text-black/60">
+              Saved items • 0
+            </span>
+          </button>
 
-          <Button
-            variant="outline"
-            className="h-auto flex-col items-start gap-1.5 rounded-2xl border-white/10 bg-white/[0.04] px-3 py-3 text-left text-zinc-100 hover:bg-white/[0.07] hover:text-white disabled:cursor-not-allowed disabled:opacity-60"
+          <button
+            className="nb-card nb-press flex h-auto cursor-pointer flex-col items-start gap-1.5 px-3 py-3 text-left text-black disabled:cursor-not-allowed disabled:opacity-70"
             onClick={() => openExtensionPage("history.html")}
             disabled={isCapturing}
             title={isCapturing ? "Wait for the capture to finish" : "Open history"}
           >
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-white/[0.07] text-zinc-200 ring-1 ring-white/10">
-              <Clock className="h-3.5 w-3.5" />
+            <span className="flex h-8 w-8 items-center justify-center border-2 border-black bg-black text-white">
+              <Clock className="h-4 w-4" strokeWidth={2.25} />
             </span>
-            <span className="text-[13px] font-medium leading-none">History</span>
-            <span className="text-[11px] font-normal leading-none text-zinc-500">Activity • 0</span>
-          </Button>
+            <span className="text-[14px] font-bold leading-none">History</span>
+            <span className="font-mono text-[10.5px] font-medium leading-none text-black/60">
+              Activity • 0
+            </span>
+          </button>
         </div>
-
-        <Button
-          variant="ghost"
-          className="mt-2 w-full justify-center rounded-xl bg-white/[0.04] text-[12px] font-medium text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-60"
-          onClick={() => openExtensionPage("editor.html")}
-          disabled={isCapturing}
-          title={isCapturing ? "Wait for the capture to finish — opening a tab now would stop it" : "Open empty editor"}
-        >
-          <span className={`inline-flex h-1.5 w-1.5 rounded-full ${isCapturing ? "bg-amber-400" : "bg-emerald-400"}`} />
-          {isCapturing ? "Capturing — stay on this tab…" : "Open Editor (empty state)"}
-        </Button>
       </div>
 
-      <Separator className="bg-white/[0.07]" />
-
       {/* Footer */}
-      <div className="flex items-center justify-between bg-white/[0.02] px-4 py-2.5">
-        <span className="font-mono text-[10px] tracking-wide text-zinc-600">MANIFEST V3 • MV3</span>
-        <span className="text-[11px] font-medium text-zinc-500">activeTab + storage + scripting</span>
+      <div className="flex items-center justify-between border-t-2 border-black bg-[#FFE9C7] px-4 py-2">
+        <span className="font-mono text-[10px] font-bold tracking-wide">SCREENX © 2026</span>
+        <span className="font-mono text-[10px] text-black/60">MANIFEST V3</span>
       </div>
     </div>
   );

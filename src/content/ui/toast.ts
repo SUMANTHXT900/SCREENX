@@ -1,4 +1,5 @@
 import { ensureUiRoot, cleanupUiRootIfEmpty } from "./shadowHost.js";
+import { dataUrlToBlobAsync, markLocalCopyDone } from "../clipboardWrite.js";
 
 export interface ToastAction {
   id: "open-editor" | "copy" | "download";
@@ -37,6 +38,10 @@ const ACTION_ICONS: Record<ToastAction["id"], string> = {  "open-editor":
   download:
     '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
 };
+
+/** Button busy spinner (CSS animation in the shadow root — no SMIL). */
+const SPINNER_SVG =
+  '<svg class="toast-spinner" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.75" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.56"/></svg>';
 
 /** Only one sticky choice toast at a time — a new capture retires the old one. */
 function dismissStickyToasts(): void {
@@ -91,14 +96,15 @@ export function showToast(options: ToastOptions): void {
   const copied = hasActions && !copyAction;
   const pill = hasActions
     ? `<span class="toast-pill ${copied ? "toast-pill--green" : "toast-pill--amber"}">${
-        copied ? "Copied" : "Not copied yet"
+        copied ? "On clipboard" : "Copy pending"
       }</span>`
     : "";
 
   const iconSvg = isSuccess
-    ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ade80" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`
-    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#f87171" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="6" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
-  const brandSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 2l2.4 7.2H22l-6 4.6 2.3 7.2-6.3-4.5-6.3 4.5L8 13.8 2 9.2h7.6z" fill="url(#sxg)"/><defs><linearGradient id="sxg" x1="2" y1="2" x2="22" y2="22"><stop stop-color="#60a5fa"/><stop offset="1" stop-color="#a855f7"/></linearGradient></defs></svg>`;
+    ? `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#4ADE80" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`
+    : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="6" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>`;
+  // Crop-corners mark — the tool's job, drawn crisply. No decorative stars.
+  const brandSvg = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#000" stroke-width="2.75" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9V6a2 2 0 0 1 2-2h3"/><path d="M15 4h3a2 2 0 0 1 2 2v3"/><path d="M20 15v3a2 2 0 0 1-2 2h-3"/><path d="M9 20H6a2 2 0 0 1-2-2v-3"/></svg>`;
 
   toast.innerHTML = `
     <div class="toast-top">
@@ -112,9 +118,21 @@ export function showToast(options: ToastOptions): void {
         </div>
         <div class="toast-message">${options.message}</div>
       </div>
-      <button class="toast-close-btn" title="Dismiss">
+      ${
+        options.sticky
+          ? `<span class="toast-timer">
+        <svg class="toast-timer-ring" width="32" height="32" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="4" y="4" width="24" height="24" class="toast-timer-track" />
+          <rect x="4" y="4" width="24" height="24" class="toast-timer-fill" data-sx-timer-fill />
+        </svg>
+        <button class="toast-close-btn" title="Dismiss (auto-closes after 30s idle)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </span>`
+          : `<button class="toast-close-btn" title="Dismiss">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
-      </button>
+      </button>`
+      }
     </div>
     ${
       hasActions
@@ -128,11 +146,19 @@ export function showToast(options: ToastOptions): void {
 
   const closeBtn = toast.querySelector("button");
   let removeTimer: ReturnType<typeof setTimeout> | null = null;
+  let timerRaf: number | null = null;
+  let dismissed = false;
 
   const dismiss = () => {
+    if (dismissed) return;
+    dismissed = true;
     if (removeTimer) {
       clearTimeout(removeTimer);
       removeTimer = null;
+    }
+    if (timerRaf !== null) {
+      cancelAnimationFrame(timerRaf);
+      timerRaf = null;
     }
     toast.classList.add("closing");
     setTimeout(() => {
@@ -146,6 +172,49 @@ export function showToast(options: ToastOptions): void {
   if (closeBtn) {
     closeBtn.addEventListener("click", dismiss);
   }
+
+  // 30s idle countdown for sticky toasts: a depleting square ring hugging
+  // the X (same brutalist geometry — no circles). Pauses while the tab is
+  // hidden (don't punish pasting elsewhere) and restarts on Copy/Download
+  // taps — only Editor/X close immediately. 24×24 rect → perimeter 96.
+  const RING_C = 96;
+  const IDLE_MS = 30_000;
+  const ringFill = toast.querySelector<SVGCircleElement>("[data-sx-timer-fill]");
+  let idleStart = 0;
+  const stopTimer = () => {
+    if (timerRaf !== null) {
+      cancelAnimationFrame(timerRaf);
+      timerRaf = null;
+    }
+  };
+  const startTimer = () => {
+    stopTimer();
+    if (!ringFill || dismissed) return;
+    idleStart = performance.now();
+    let lastTick = 0;
+    const tick = (now: number) => {
+      if (dismissed) return;
+      // rAF stalls while the tab is hidden: credit the gap back so the
+      // countdown only runs while the user can actually see the toast.
+      if (lastTick > 0) idleStart += Math.max(0, now - lastTick - 50);
+      lastTick = now;
+      const remaining = Math.max(0, IDLE_MS - (now - idleStart));
+      ringFill.style.strokeDashoffset = String(RING_C * (1 - remaining / IDLE_MS));
+      if (remaining <= 0) {
+        dismiss();
+        return;
+      }
+      timerRaf = requestAnimationFrame(tick);
+    };
+    ringFill.style.strokeDasharray = String(RING_C);
+    ringFill.style.strokeDashoffset = "0";
+    timerRaf = requestAnimationFrame(tick);
+  };
+  /** User did something — give them a fresh 30s. */
+  const pokeTimer = () => {
+    if (ringFill && !dismissed) startTimer();
+  };
+  if (options.sticky && ringFill) startTimer();
 
   container.appendChild(toast);
 
@@ -167,48 +236,87 @@ export function showToast(options: ToastOptions): void {
       const label = document.createElement("span");
       label.textContent = action.label;
       btn.append(icon, label);
+
+      /** Swap button content; returns a restore fn for the original. */
+      const setBusy = (busyLabel: string): (() => void) => {
+        const prevIcon = icon.innerHTML;
+        const prevLabel = label.textContent;
+        btn.disabled = true;
+        icon.innerHTML = SPINNER_SVG;
+        label.textContent = busyLabel;
+        return () => {
+          btn.disabled = false;
+          icon.innerHTML = prevIcon;
+          label.textContent = prevLabel ?? "";
+        };
+      };
+      /** Flip the choice toast's pill to its copied state. */
+      const markPillCopied = () => {
+        const pill = toast.querySelector(".toast-pill");
+        if (!pill) return;
+        pill.classList.remove("toast-pill--amber");
+        pill.classList.add("toast-pill--green");
+        pill.textContent = "On clipboard";
+      };
+
       btn.addEventListener("click", () => {
         console.debug("[ScreenX] toast action clicked:", action.id, action.captureId);
-        // Copy with pre-delivered bytes writes SYNCHRONOUSLY in this click:
-        // transient activation only covers the synchronous part of a user
-        // gesture, so any await before write() forfeits it.
+        // Copy / Download keep the toast OPEN (user may still want the other
+        // action); only Open-in-Editor and the X dismiss it. Any tap pokes
+        // the 30s idle timer for a fresh window.
         if (
           action.id === "copy" &&
           typeof action.dataUrl === "string" &&
           action.dataUrl.startsWith("data:image/")
         ) {
-          try {
-            const pending = fetch(action.dataUrl).then((res) => {
-              if (!res.ok) throw new Error("decode-failed");
-              return res.blob();
-            });
-            navigator.clipboard
-              .write([new ClipboardItem({ "image/png": pending })])
-              .then(
-                () => {
-                  console.debug("[ScreenX] toast Copy click: clipboard write ok=true");
-                  dismiss();
-                  showToast({
-                    type: "success",
-                    title: "Copied",
-                    message: "Screenshot is on your clipboard — paste it anywhere.",
-                  });
-                },
-                (e) => {
-                  console.debug(
-                    "[ScreenX] toast Copy click: direct write failed, falling back:",
-                    e instanceof Error ? e.message : String(e)
-                  );
-                  sendCopyActionToWorker(action);
-                  dismiss();
-                }
-              );
-          } catch {
+          // Second tap after a direct-write failure goes the worker route
+          // (different bytes path — worth one shot, reported separately).
+          if (btn.dataset.failed === "1") {
+            pokeTimer();
+            const restore = setBusy("Retrying…");
             sendCopyActionToWorker(action);
-            dismiss();
+            setTimeout(restore, 2000);
+            return;
           }
+          pokeTimer();
+          const restore = setBusy("Copying…");
+          // Async chunked decode yields between 1 MiB slices so the spinner
+          // above keeps animating on huge images instead of one long hitch.
+          // markLocalCopyDone runs BEFORE write() so this in-gesture write
+          // beats any in-flight background retry in slot ordering.
+          void (async () => {
+            try {
+              const blob = await dataUrlToBlobAsync(action.dataUrl as string);
+              markLocalCopyDone();
+              await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+              console.debug("[ScreenX] toast Copy click: clipboard write ok=true");
+              markPillCopied();
+              restore();
+              label.textContent = "Copied ✓";
+              setTimeout(() => {
+                if (label.textContent === "Copied ✓") label.textContent = action.label;
+              }, 2500);
+            } catch (e) {
+              console.debug(
+                "[ScreenX] toast Copy click: direct write failed, falling back:",
+                e instanceof Error ? e.message : String(e)
+              );
+              restore();
+              btn.dataset.failed = "1";
+              label.textContent = "Failed — tap to retry";
+              sendCopyActionToWorker(action);
+            }
+          })();
           return;
         }
+        if (action.id === "download") {
+          pokeTimer();
+          const restore = setBusy("Saving…");
+          sendCopyActionToWorker(action);
+          setTimeout(restore, 2000);
+          return;
+        }
+        // open-editor (and any unknown action): done here, continue there.
         sendCopyActionToWorker(action);
         dismiss();
       });

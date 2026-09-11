@@ -26,55 +26,66 @@ export default function ExportModal({ open, busy, error, fileName, onClose, onDo
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="w-full max-w-sm rounded-2xl border border-[hsl(var(--border))] bg-white p-5 shadow-xl">
+      <div className="w-full max-w-sm border-[3px] border-black bg-[#FFFDF7] p-5 shadow-[8px_8px_0_#000]">
         <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Export image</h2>
-          <button type="button" onClick={onClose} className="rounded-lg p-1 hover:bg-[hsl(var(--secondary))]" title="Close">
-            <X className="h-4 w-4" />
+          <h2 className="font-['Bricolage_Grotesque','Public_Sans',sans-serif] text-[16px] font-extrabold tracking-tight">
+            Export image
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="cursor-pointer border-2 border-black bg-white p-1 hover:bg-black hover:text-white"
+            title="Close"
+          >
+            <X className="h-4 w-4" strokeWidth={2.5} />
           </button>
         </div>
-        <p className="mt-1 font-mono text-[11px] text-[hsl(var(--muted-foreground))]">{fileName} • annotations flattened</p>
+        <p className="mt-1 font-mono text-[11px] text-black/60">{fileName} • annotations flattened</p>
         <div className="mt-4 grid grid-cols-3 gap-2">
           {FORMATS.map((f) => (
             <button
               key={f.id}
               type="button"
               onClick={() => setExportFormat(f.id)}
-              className={`rounded-xl border px-2 py-2.5 text-center transition ${
+              className={`cursor-pointer border-2 border-black px-2 py-2.5 text-center transition-all duration-100 ${
                 exportFormat === f.id
-                  ? "border-[hsl(var(--primary))] bg-[hsl(var(--primary))]/5"
-                  : "border-[hsl(var(--border))] hover:bg-[hsl(var(--secondary))]"
+                  ? "bg-black text-white shadow-[3px_3px_0_rgba(0,0,0,0.3)]"
+                  : "bg-white shadow-[3px_3px_0_#000] hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[4px_4px_0_#000]"
               }`}
             >
-              <div className="text-sm font-semibold">{f.label}</div>
-              <div className="text-[11px] text-[hsl(var(--muted-foreground))]">{f.hint}</div>
+              <div className="text-sm font-extrabold">{f.label}</div>
+              <div className={`text-[11px] font-medium ${exportFormat === f.id ? "text-white/70" : "text-black/55"}`}>
+                {f.hint}
+              </div>
             </button>
           ))}
         </div>
         {exportFormat !== "png" && (
-          <label className="mt-4 flex items-center gap-2 text-xs text-[hsl(var(--muted-foreground))]">
+          <label className="mt-4 flex items-center gap-2 text-xs font-medium text-black/70">
             Quality
             <input
               type="range" min={0.5} max={1} step={0.02} value={exportQuality}
               onChange={(e) => setExportQuality(Number(e.target.value))}
-              className="flex-1 accent-[hsl(var(--primary))]"
+              className="flex-1 accent-black"
             />
             <span className="w-10 font-mono">{Math.round(exportQuality * 100)}%</span>
           </label>
         )}
-        {error && <p className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>}
+        {error && (
+          <p className="mt-3 border-2 border-black bg-[#F87171] px-3 py-2 text-xs font-bold">{error}</p>
+        )}
         <button
           type="button"
           onClick={onDownload}
           disabled={busy}
-          className="mt-4 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-[hsl(var(--primary))] px-3 py-2 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
+          className="mt-4 inline-flex w-full cursor-pointer items-center justify-center gap-1.5 border-2 border-black bg-black px-3 py-2.5 text-sm font-bold text-white shadow-[4px_4px_0_rgba(0,0,0,0.3)] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <Download className="h-4 w-4" /> {busy ? "Rendering…" : `Download ${exportFormat.toUpperCase()}`}
+          <Download className="h-4 w-4" strokeWidth={2.5} /> {busy ? "Rendering…" : `Download ${exportFormat.toUpperCase()}`}
         </button>
       </div>
     </div>

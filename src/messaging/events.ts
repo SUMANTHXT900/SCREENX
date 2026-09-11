@@ -184,6 +184,12 @@ export interface CopyImageMessage {
   type: "SCREENX_COPY_IMAGE";
   /** PNG data URL to write to the clipboard (JSON-safe transport). */
   dataUrl: string;
+  /**
+   * Wall-clock ordering token (Date.now() at send). The content script drops
+   * writes older than the newest seen, so a stale auto-copy retry can never
+   * overwrite a newer capture's image. Absent = accept (back-compat).
+   */
+  seq?: number;
 }
 
 export interface CopyImageResponse {
