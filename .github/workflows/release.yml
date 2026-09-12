@@ -1,0 +1,63 @@
+name: Release
+
+# Cut a release by pushing a version tag that matches src/manifest.json:
+#   git tag v0.1.22 && git push origin v0.1.22
+# The workflow verifies tag == manifest version, runs full gates, zips
+# dist/ (manifest.json at zip root so it loads unpacked as-is), and
+# publishes a GitHub Release with the zip + install instructions.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Tag must match manifest version
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          MF="$(node -p "require('./src/manifest.json').version")"
+          echo "tag=$TAG manifest=$MF"
+          test "$TAG" = "$MF" || { echo "::error::tag v$TAG != manifest version $MF"; exit 1; }
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run lint
+      - run: npm run build
+      - name: Zip dist (manifest at zip root)
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          cd dist && zip -r "../screenx-v${TAG}.zip" . && cd ..
+          unzip -l "screenx-v${TAG}.zip" | head -12
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: screenx-v*.zip
+          generate_release_notes: false
+          body: |
+            ## ScreenX ${{ github.ref_name }} — ready to install, no build needed
+
+            **New here? Install in 2 minutes:**
+
+            1. Download `screenx-${{ github.ref_name }}.zip` below and unzip it anywhere.
+            2. Open `chrome://extensions` → enable **Developer mode** (top right).
+            3. Click **Load unpacked** → select the unzipped folder. Done — pin ScreenX to the toolbar.
+
+            To update later, download the newer zip, replace the folder contents, and hit **Reload** on `chrome://extensions`.
+
+            ---
+
+            **What is ScreenX?** A Manifest V3 screenshot extension for Chromium: visible / full-page / selected-area capture, annotation editor, workspace, and history — 100% local, no accounts, no analytics. See [PRIVACY.md](https://github.com/SUMANTHXT900/SCREENX/blob/main/PRIVACY.md).
+
+            - Shortcuts: `Alt`+`Shift`+`S` visible · `F` full page · `C` selected area (`Esc` cancels)
+            - Developers: `git clone`, `npm install`, `npm run build` — full guide in the [README](https://github.com/SUMANTHXT900/SCREENX#readme)
+            - Found a bug? [Open an issue](https://github.com/SUMANTHXT900/SCREENX/issues)

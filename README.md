@@ -11,7 +11,7 @@
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](https://www.typescriptlang.org)
 [![Tailwind](https://img.shields.io/badge/Tailwind-v4-38bdf8)](https://tailwindcss.com)
 [![Tests](https://img.shields.io/badge/tests-116_passing-4ADE80)](#testing)
-[![pnpm](https://img.shields.io/badge/pnpm-required-FBBF24)](https://pnpm.io)
+[![npm](https://img.shields.io/badge/npm-required-FBBF24)](https://npmjs.com)
 [![License](https://img.shields.io/badge/License-MIT-F87171)](#license)
 [![Privacy](https://img.shields.io/badge/privacy-100%25_local-4ADE80)](PRIVACY.md)
 
@@ -47,18 +47,26 @@ Remappable at `chrome://extensions/shortcuts`. If a shortcut row appears blank, 
 
 ## Quickstart
 
+**No build needed — install from a release:**
+
+1. Download the latest `screenx-v*.zip` from [Releases](https://github.com/SUMANTHXT900/SCREENX/releases/latest) and unzip it anywhere.
+2. Open `chrome://extensions` → enable **Developer mode**.
+3. **Load unpacked** → select the unzipped folder. Pin ScreenX, reload open tabs once.
+
+**From source (contributors):**
+
 ```bash
-pnpm install
-pnpm build      # typecheck + production build → dist/
+npm install
+npm run build      # typecheck + production build → dist/
 ```
 
-Load unpacked in Chrome:
+Then load unpacked in Chrome:
 
 1. Open `chrome://extensions` → enable **Developer mode**
 2. **Load unpacked** → select the `dist/` folder
 3. Pin ScreenX, reload any open tabs once (content-script protocol check)
 
-npm alternative (one-liner): `npm install && npm run build` — then load `dist/` as above. pnpm is the canonical manager (CI uses `pnpm install --frozen-lockfile`).
+> pnpm works too (`pnpm install && pnpm build`), but npm is canonical — CI installs with `npm ci`.
 
 ---
 
@@ -109,17 +117,17 @@ Conventions: `@/*` → `src/*` · every domain has an `index.ts` barrel · `cont
 
 | Script | Command | What it does |
 |---|---|---|
-| `dev` | `pnpm dev` | watch build to `dist/` (vite, development mode) |
-| `build` | `pnpm build` | `tsc -b && vite build` → production `dist/` |
-| `preview` | `pnpm preview` | preview the production build locally |
-| `typecheck` | `pnpm typecheck` | app-only typecheck (`tsconfig.app.json`, no emit) |
-| `typecheck:all` | `pnpm typecheck:all` | full project typecheck (`tsc -b`) |
-| `lint` | `pnpm lint` | eslint over the repo |
-| `test` | `pnpm test` | `vitest run` — full suite once |
-| `test:watch` | `pnpm test:watch` | vitest in watch mode |
-| `clean` | `pnpm clean` | remove `dist/` |
+| `dev` | `npm run dev` | watch build to `dist/` (vite, development mode) |
+| `build` | `npm run build` | `tsc -b && vite build` → production `dist/` |
+| `preview` | `npm run preview` | preview the production build locally |
+| `typecheck` | `npm run typecheck` | app-only typecheck (`tsconfig.app.json`, no emit) |
+| `typecheck:all` | `npm run typecheck:all` | full project typecheck (`tsc -b`) |
+| `lint` | `npm run lint` | eslint over the repo |
+| `test` | `npm test` | `vitest run` — full suite once |
+| `test:watch` | `npm run test:watch` | vitest in watch mode |
+| `clean` | `npm run clean` | remove `dist/` |
 
-**Gates (CI, in order):** `pnpm typecheck` → `pnpm test` → `pnpm lint` → `pnpm build`. Run all four before opening a PR. CI runs on pushes to `main`/`dev` and all pull requests.
+**Gates (CI, in order):** `npm run typecheck` → `npm test` → `npm run lint` → `npm run build`. Run all four before opening a PR. CI runs on pushes to `main`/`dev` and all pull requests.
 
 ### Testing
 
@@ -174,7 +182,8 @@ No host permissions — ScreenX can't read browsing history or run on pages you 
 ## Contributing
 
 - Branch from / target **`dev`**; `main` is release-only.
-- Run the gates before pushing: `pnpm typecheck && pnpm test && pnpm lint && pnpm build`.
+- Run the gates before pushing: `npm run typecheck && npm test && npm run lint && npm run build`.
+- Cut releases with a version tag (`git tag v0.1.22 && git push origin v0.1.22`) — CI verifies tag == manifest, runs gates, and publishes the `dist/` zip.
 - Keep `content.js` a **classic bundle** — no `import` statements (build guard + `content-bundle` test enforce this).
 - Keep captures local-only: no network calls, no new permissions without a `PRIVACY.md` update.
 

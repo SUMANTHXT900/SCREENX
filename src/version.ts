@@ -9,8 +9,8 @@
  *
  * Keep manifest.json `version` in sync manually (Chrome requires it there).
  */
-export const APP_VERSION = "0.1.21";
-export const APP_CODENAME = "open";
+export const APP_VERSION = "0.1.22";
+export const APP_CODENAME = "ship";
 
 export function buildTag(proto?: number): string {
   const base = `v${APP_VERSION}-${APP_CODENAME}`;
