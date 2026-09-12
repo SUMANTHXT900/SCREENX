@@ -14,8 +14,34 @@
 [![npm](https://img.shields.io/badge/npm-required-FBBF24)](https://npmjs.com)
 [![License](https://img.shields.io/badge/License-MIT-F87171)](#license)
 [![Privacy](https://img.shields.io/badge/privacy-100%25_local-4ADE80)](PRIVACY.md)
+[![Download](https://img.shields.io/badge/download-latest_release-FBBF24)](https://github.com/SUMANTHXT900/SCREENX/releases/latest)
 
 </div>
+
+---
+
+## Quickstart
+
+**No build needed — install from a release:**
+
+1. Download the latest `screenx-v*.zip` from [Releases](https://github.com/SUMANTHXT900/SCREENX/releases/latest) and unzip it anywhere.
+2. Open `chrome://extensions` → enable **Developer mode**.
+3. **Load unpacked** → select the unzipped folder. Pin ScreenX, reload open tabs once.
+
+**From source (contributors):**
+
+```bash
+npm install
+npm run build      # typecheck + production build → dist/
+```
+
+Then load unpacked in Chrome:
+
+1. Open `chrome://extensions` → enable **Developer mode**
+2. **Load unpacked** → select the `dist/` folder
+3. Pin ScreenX, reload any open tabs once (content-script protocol check)
+
+> pnpm works too (`pnpm install && pnpm build`), but npm is canonical — CI installs with `npm ci`.
 
 ---
 
@@ -42,31 +68,6 @@
 Remappable at `chrome://extensions/shortcuts`. If a shortcut row appears blank, re-assign it there — Chrome sometimes drops suggested keys on reinstall.
 
 **Flow:** trigger from popup or shortcut (popup closes immediately, capture runs in the background) → watch the **progress HUD** (stay on the tab until it finishes) → image is **auto-copied**, choice toast offers Editor / Copy / Download → everything lands in **Workspace** and **History**.
-
----
-
-## Quickstart
-
-**No build needed — install from a release:**
-
-1. Download the latest `screenx-v*.zip` from [Releases](https://github.com/SUMANTHXT900/SCREENX/releases/latest) and unzip it anywhere.
-2. Open `chrome://extensions` → enable **Developer mode**.
-3. **Load unpacked** → select the unzipped folder. Pin ScreenX, reload open tabs once.
-
-**From source (contributors):**
-
-```bash
-npm install
-npm run build      # typecheck + production build → dist/
-```
-
-Then load unpacked in Chrome:
-
-1. Open `chrome://extensions` → enable **Developer mode**
-2. **Load unpacked** → select the `dist/` folder
-3. Pin ScreenX, reload any open tabs once (content-script protocol check)
-
-> pnpm works too (`pnpm install && pnpm build`), but npm is canonical — CI installs with `npm ci`.
 
 ---
 
