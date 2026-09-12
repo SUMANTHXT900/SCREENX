@@ -14,7 +14,7 @@
 [![npm](https://img.shields.io/badge/npm-required-FBBF24)](https://npmjs.com)
 [![License](https://img.shields.io/badge/License-MIT-F87171)](#license)
 [![Privacy](https://img.shields.io/badge/privacy-100%25_local-4ADE80)](PRIVACY.md)
-[![Download](https://img.shields.io/badge/download-latest_release-FBBF24)](https://github.com/SUMANTHXT900/SCREENX/releases/latest)
+[![Download](https://img.shields.io/badge/download-latest-FBBF24)](https://github.com/SUMANTHXT900/SCREENX/releases/latest/download/screenx-latest.zip)
 
 </div>
 
@@ -24,7 +24,7 @@
 
 **No build needed — install from a release:**
 
-1. Download the latest `screenx-v*.zip` from [Releases](https://github.com/SUMANTHXT900/SCREENX/releases/latest) and unzip it anywhere.
+1. Download [**screenx-latest.zip**](https://github.com/SUMANTHXT900/SCREENX/releases/latest/download/screenx-latest.zip) and unzip it anywhere.
 2. Open `chrome://extensions` → enable **Developer mode**.
 3. **Load unpacked** → select the unzipped folder. Pin ScreenX, reload open tabs once.
 

@@ -1,7 +1,7 @@
 {
   "name": "screenx",
   "private": true,
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "ScreenX — premium screenshot capture and editor for Chrome",
   "type": "module",
   "scripts": {
