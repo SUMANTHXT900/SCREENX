@@ -81,7 +81,16 @@ export interface BlurShape extends ShapeBase {
   h: number;
 }
 
-export type Shape = RectShape | EllipseShape | ArrowShape | TextShape | PencilShape | HighlightShape | BadgeShape | BlurShape;
+export interface RedactShape extends ShapeBase {
+  /** Opaque blackout — unlike blur, nothing shows through. Ever. */
+  kind: "redact";
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export type Shape = RectShape | EllipseShape | ArrowShape | TextShape | PencilShape | HighlightShape | BadgeShape | BlurShape | RedactShape;
 
 export interface CropRect {
   x: number;
@@ -110,6 +119,12 @@ interface EditorStore {
   future: Shape[][];
   selectedId: string | null;
   pendingCrop: CropRect | null;
+  /**
+   * True while the text composer (textarea) is open. Global hotkeys must
+   * stand down — otherwise typing letters like R/O/A/T/P hijacks the tools.
+   */
+  composing: boolean;
+  setComposing: (on: boolean) => void;
   setTool: (t: AnnotationTool) => void;
   setColor: (c: string) => void;
   setStrokeWidth: (w: number) => void;
@@ -146,6 +161,8 @@ export const useEditorStore = create<EditorStore>()((set) => ({
   future: [],
   selectedId: null,
   pendingCrop: null,
+  composing: false,
+  setComposing: (on) => set({ composing: on }),
   setTool: (t) => set({ activeTool: t, selectedId: null }),
   setColor: (c) => set({ color: c }),
   setStrokeWidth: (w) => set({ strokeWidth: w }),
@@ -221,6 +238,7 @@ export const useEditorStore = create<EditorStore>()((set) => ({
       selectedId: null,
       pendingCrop: null,
       activeTool: "select",
+      composing: false,
     }),
   newId: () => uid(),
 }));

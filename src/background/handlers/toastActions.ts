@@ -26,12 +26,10 @@ export async function openEditorForToastAction(captureId: string, groupId?: stri
  * - content not listening → best-effort re-ensure, then report precisely.
  */
 export async function retryCopyFromToast(captureId: string, tabId?: number): Promise<void> {
-  const log = `retry-copy [${captureId}]`;
   try {
     const record = await getCapture(captureId).catch(() => null);
     const targetTab = tabId ?? record?.sourceTabId;
     if (!record || !record.blob || record.blob.size === 0) {
-      console.debug(`[ScreenX] ${log} → no stored image; pointing at Download`);
       sendToastToActiveTab({
         type: "error",
         title: "Copy failed",
@@ -52,7 +50,6 @@ export async function retryCopyFromToast(captureId: string, tabId?: number): Pro
     // Say so instead of attempting a doomed write.
     const dataUrl = await encodeForClipboard(record.blob);
     if (!dataUrl) {
-      console.debug(`[ScreenX] ${log} → oversized, skipping write`);
       sendToastToActiveTab({
         type: "error",
         title: "Copy failed",
@@ -68,12 +65,11 @@ export async function retryCopyFromToast(captureId: string, tabId?: number): Pro
       await ensureContentScript(tab);
     } catch (e) {
       const msg = e instanceof CaptureError ? e.message : e instanceof Error ? e.message : String(e);
-      console.debug(`[ScreenX] ${log} → content unavailable:`, msg);
       sendToastToActiveTab({ type: "error", title: "Copy failed", message: msg });
       return;
     }
     const { windowId } = await readTab(targetTab);
-    const attempt = await attemptCopyWithFocus(targetTab, dataUrl, windowId, log);
+    const attempt = await attemptCopyWithFocus(targetTab, dataUrl, windowId);
     if (attempt.copied) {
       sendToastToActiveTab({
         type: "success",
@@ -83,7 +79,6 @@ export async function retryCopyFromToast(captureId: string, tabId?: number): Pro
       return;
     }
     const err = attempt.lastReport?.error ?? "refused";
-    console.debug(`[ScreenX] ${log} → final failure:`, err, { focused: attempt.lastReport?.focused });
     sendToastToActiveTab({
       type: "error",
       title: "Copy failed",

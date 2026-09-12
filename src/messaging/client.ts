@@ -117,6 +117,20 @@ export function sendToast(tabId: number, toast: ToastOptions): void {
   }
 }
 
+/**
+ * Delivery-checked toast send. Resolves false (never throws) when the tab
+ * has no listening content script — callers escalate to a notification
+ * instead of fading silently.
+ */
+export async function sendToastToTab(tabId: number, toast: ToastOptions): Promise<{ delivered: boolean }> {
+  try {
+    const res = await sendToContent<{ ok?: boolean }>(tabId, { type: "SCREENX_TOAST", toast });
+    return { delivered: res?.ok === true };
+  } catch {
+    return { delivered: false };
+  }
+}
+
 export async function hideProgressHud(tabId: number): Promise<void> {
   try {
     await sendToContent<{ ok: true }>(tabId, { type: "SCREENX_HIDE_PROGRESS" });

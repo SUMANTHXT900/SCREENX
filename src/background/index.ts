@@ -8,21 +8,24 @@ import { openEditorForToastAction, retryCopyFromToast } from "./handlers/toastAc
 import { forwardToActiveTab } from "./handlers/commandHandler";
 import { downloadCapture } from "./handlers/downloadHandler";
 import { wireNotificationClicks } from "./handlers/notifyFallback";
+import { verifyToastToken } from "./handlers/toastTokens";
+import { getCapture } from "@/storage/idb";
 import { purgeExpiredGlobalLock } from "@/capture/engine/globalLock";
+import { recoverInterruptedSelection } from "@/capture/selectedArea";
 import { clearCaptureBadge } from "@/messaging/client";
 
-chrome.runtime.onInstalled.addListener((details) => {
-  console.debug("[ScreenX] background installed:", details.reason);
-});
-
 // Fresh worker: drop any stale toolbar badge, purge a dead worker's expired
-// lock claim (collapses the phantom "already capturing" window to ~0), and
-// re-show an unannounced capture instead of fading silently.
+// lock claim (collapses the phantom "already capturing" window to ~0),
+// close an orphaned selection wait loudly, and re-show an unannounced
+// capture instead of fading silently.
 clearCaptureBadge();
 void purgeExpiredGlobalLock().catch(() => {
   // ignore — purge is best-effort; TTL expires the claim anyway
 });
 wireNotificationClicks();
+void recoverInterruptedSelection().catch(() => {
+  // ignore — recovery is best-effort
+});
 void recoverPendingChoice().catch(() => {
   // ignore — recovery is best-effort
 });
@@ -39,14 +42,12 @@ function shouldDebounce(command: string): boolean {
   const prev = lastCommandAt.get(command) ?? 0;
   lastCommandAt.set(command, now);
   if (now - prev < COMMAND_DEBOUNCE_MS) {
-    console.debug("[ScreenX] command debounced (repeat within 800ms):", command);
     return true;
   }
   return false;
 }
 
 chrome.commands.onCommand.addListener(async (command) => {
-  console.debug("[ScreenX] command received:", command);
   if (command === "capture-visible") {
     if (!shouldDebounce(command)) await handleCapture("visible", "capture-visible");
     return;
@@ -59,7 +60,6 @@ chrome.commands.onCommand.addListener(async (command) => {
     if (!shouldDebounce(command)) await handleCapture("selected-area", "capture-selected-area");
     return;
   }
-  console.debug("[ScreenX] unknown command:", command);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -86,7 +86,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       requested === "visible" || requested === "full-page" || requested === "selected-area"
         ? requested
         : ("selected-area" as const);
-    console.debug(`[ScreenX] trigger received: ${type} → ${captureType}`);
     // Same double-fire guard as shortcuts: the popup's disabled state lives
     // in async React state, so a fast double-click can send twice — the
     // second message is the same user intent as the in-flight run.
@@ -111,28 +110,55 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Toast action buttons (from the sticky post-capture choice toast).
   if (type === "SCREENX_TOAST_ACTION") {
-    const msg = message as { action?: string; captureId?: string; groupId?: string };
+    const msg = message as { action?: string; captureId?: string; groupId?: string; nonce?: string };
     // Prefer the tab the click came from for tab-targeted follow-ups.
     const fromTab = sender.tab?.id;
-    console.debug(
-      "[ScreenX] toast action:",
-      msg.action,
-      "captureId=" + (msg.captureId ?? "?"),
-      "fromTab=" + (fromTab ?? "?")
-    );
-    if (msg.action === "open-editor" && msg.captureId) {
-      void openEditorForToastAction(msg.captureId, msg.groupId).then(
-        () => console.debug("[ScreenX] toast action → editor opened"),
-        (e) => console.error("[ScreenX] toast action → editor open failed:", e instanceof Error ? e.message : String(e))
-      );
-    } else if (msg.action === "copy" && msg.captureId) {
-      void retryCopyFromToast(msg.captureId, fromTab);
-    } else if (msg.action === "download" && msg.captureId) {
-      console.debug("[ScreenX] toast action → download started", msg.captureId);
-      void downloadCapture(msg.captureId);
-    } else {
-      console.debug("[ScreenX] unknown toast action:", JSON.stringify(msg).slice(0, 200));
+    const runAction = (action: string, captureId: string, groupId: string | undefined): void => {
+      if (action === "open-editor") {
+        void openEditorForToastAction(captureId, groupId).then(
+          undefined,
+          (e) => console.error("[ScreenX] toast action → editor open failed:", e instanceof Error ? e.message : String(e))
+        );
+      } else if (action === "copy") {
+        void retryCopyFromToast(captureId, fromTab);
+      } else if (action === "download") {
+        void downloadCapture(captureId);
+      }
+      // ignore anything else
+    };
+    // Shape check first: ids are alphanumerics/dashes only (UUIDs in
+    // practice) — rejects injection smuggled through id fields.
+    const idOk = (v: string): boolean => v.length > 0 && v.length <= 64 && /^[A-Za-z0-9-]+$/.test(v);
+    const { action } = msg;
+    const rawId = msg.captureId ?? "";
+    if ((action !== "open-editor" && action !== "copy" && action !== "download") || !idOk(rawId)) {
+      return false;
     }
+    if (msg.groupId !== undefined && !idOk(msg.groupId)) return false;
+    const grant = verifyToastToken(msg.nonce, rawId, fromTab);
+    if (grant) {
+      // Bound ids win over the message's — a tampered captureId fails closed.
+      runAction(action, grant.captureId, grant.groupId);
+      return false;
+    }
+    if (fromTab === undefined) {
+      // Extension pages (popup/editor/workspace/history) have no sender tab
+      // and are same-origin UI — allow without a grant.
+      runAction(action, rawId, msg.groupId);
+      return false;
+    }
+    // Legacy path (pre-grant sticky toasts): only the tab that owns the
+    // capture may drive it — never a foreign tab. Async by necessity
+    // (IDB read); actions are fire-and-forget by design.
+    void (async () => {
+      try {
+        const record = await getCapture(rawId).catch(() => null);
+        if (record?.sourceTabId !== undefined && fromTab !== record.sourceTabId) return;
+        runAction(action, rawId, msg.groupId);
+      } catch {
+        // ignore
+      }
+    })();
     return false;
   }
 

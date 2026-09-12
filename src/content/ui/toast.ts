@@ -7,6 +7,8 @@ export interface ToastAction {
   captureId: string;
   groupId?: string;
   dataUrl?: string;
+  /** Grant nonce echoed back so the worker can verify the click (see events). */
+  nonce?: string;
 }
 
 export interface ToastOptions {
@@ -66,10 +68,21 @@ function sendCopyActionToWorker(action: ToastAction): void {
       action: action.id,
       captureId: action.captureId,
       ...(action.groupId ? { groupId: action.groupId } : {}),
+      ...(action.nonce ? { nonce: action.nonce } : {}),
     });
   } catch {
     // ignore — background may be unreachable
   }
+}
+
+/** HTML-escape for interpolated toast text (title/message are worker-supplied). */
+function escText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Strict data-URL allowlist for the thumbnail src (prefix checks are bypassable). */
+function safeThumbUrl(url: string): string | null {
+  return /^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(url) ? url : null;
 }
 
 export function showToast(options: ToastOptions): void {
@@ -79,6 +92,8 @@ export function showToast(options: ToastOptions): void {
   const toast = document.createElement("div");
   const hasActions = !!options.actions && options.actions.length > 0;
   toast.className = "toast-item";
+  // Screen-reader announcement: toasts are the sole capture-complete signal.
+  toast.setAttribute("role", options.type === "error" ? "alert" : "status");
   if (options.sticky) toast.dataset.sticky = "1";
   const isSuccess = options.type === "success";
   const defaultTitle = isSuccess ? "Success" : "Error";
@@ -88,9 +103,7 @@ export function showToast(options: ToastOptions): void {
   // thumbnail. Plain toasts get an icon tile matching their tone.
   const copyAction = hasActions ? options.actions!.find((a) => a.id === "copy") : undefined;
   const thumbUrl =
-    copyAction && typeof copyAction.dataUrl === "string" && copyAction.dataUrl.startsWith("data:image/")
-      ? copyAction.dataUrl
-      : null;
+    copyAction && typeof copyAction.dataUrl === "string" ? safeThumbUrl(copyAction.dataUrl) : null;
   // Pill reflects clipboard state: every choice toast is either already
   // copied (green) or still needs the Copy tap (amber).
   const copied = hasActions && !copyAction;
@@ -113,10 +126,10 @@ export function showToast(options: ToastOptions): void {
       </div>
       <div class="toast-head">
         <div class="toast-title-row">
-          <div class="toast-title">${title}</div>
+          <div class="toast-title">${escText(title)}</div>
           ${pill}
         </div>
-        <div class="toast-message">${options.message}</div>
+        <div class="toast-message">${escText(options.message)}</div>
       </div>
       ${
         options.sticky
@@ -125,11 +138,11 @@ export function showToast(options: ToastOptions): void {
           <rect x="4" y="4" width="24" height="24" class="toast-timer-track" />
           <rect x="4" y="4" width="24" height="24" class="toast-timer-fill" data-sx-timer-fill />
         </svg>
-        <button class="toast-close-btn" title="Dismiss (auto-closes after 30s idle)">
+        <button class="toast-close-btn" title="Dismiss (auto-closes after 30s idle)" aria-label="Dismiss notification">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
         </button>
       </span>`
-          : `<button class="toast-close-btn" title="Dismiss">
+          : `<button class="toast-close-btn" title="Dismiss" aria-label="Dismiss notification">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
       </button>`
       }
@@ -143,6 +156,15 @@ export function showToast(options: ToastOptions): void {
         : ""
     }
   `;
+
+  // Keyboard dismiss: Escape while focus is inside the toast (page-level
+  // keys are untouched — the listener lives on the toast root only).
+  toast.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.stopPropagation();
+      dismiss();
+    }
+  });
 
   const closeBtn = toast.querySelector("button");
   let removeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -260,7 +282,6 @@ export function showToast(options: ToastOptions): void {
       };
 
       btn.addEventListener("click", () => {
-        console.debug("[ScreenX] toast action clicked:", action.id, action.captureId);
         // Copy / Download keep the toast OPEN (user may still want the other
         // action); only Open-in-Editor and the X dismiss it. Any tap pokes
         // the 30s idle timer for a fresh window.
@@ -289,18 +310,13 @@ export function showToast(options: ToastOptions): void {
               const blob = await dataUrlToBlobAsync(action.dataUrl as string);
               markLocalCopyDone();
               await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-              console.debug("[ScreenX] toast Copy click: clipboard write ok=true");
               markPillCopied();
               restore();
               label.textContent = "Copied ✓";
               setTimeout(() => {
                 if (label.textContent === "Copied ✓") label.textContent = action.label;
               }, 2500);
-            } catch (e) {
-              console.debug(
-                "[ScreenX] toast Copy click: direct write failed, falling back:",
-                e instanceof Error ? e.message : String(e)
-              );
+            } catch {
               restore();
               btn.dataset.failed = "1";
               label.textContent = "Failed — tap to retry";

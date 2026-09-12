@@ -181,14 +181,6 @@ function scrollApi() {
   };
 }
 
-function describeTarget(): string {
-  try {
-    return selectionState.scrollTarget?.describe() ?? "window";
-  } catch {
-    return "window";
-  }
-}
-
 /** Handle released — the full range is known, so capture starts now (never mid-drag). */
 export async function triggerCapture(): Promise<void> {
   if (selectionState.state === "CAPTURING" || selectionState.state === "COMPLETED") return;
@@ -257,10 +249,6 @@ export async function triggerCapture(): Promise<void> {
     width: Math.round(clamped.width),
   };
 
-  console.debug(
-    "[ScreenX] region selected",
-    JSON.stringify({ ...selection, scrollTarget: describeTarget() })
-  );
 
   // Remember the horizontal span for next time (best-effort).
   saveLastBoxRange(clamped.left, clamped.width);
@@ -408,20 +396,9 @@ async function acceptDrawnBox(refs: OverlayRefs, drawn: SelectionBox): Promise<v
   if (selectionState.state !== "READY") return;
   if (selectionState.box !== drawn) return;
   try {
-    console.debug(
-      "[ScreenX] selection drawn",
-      JSON.stringify({
-        box: {
-          left: Math.round(drawn.left),
-          top: Math.round(drawn.top),
-          width: Math.round(drawn.width),
-          height: Math.round(drawn.height),
-        },
-        scrollTarget: describeTarget(),
-        startScrollTop: Math.round(selectionState.startScrollTop),
-      })
-    );
-  } catch {
+      // ignore
+  }
+ catch {
     // ignore
   }
   // Intentionally NOT re-armed: armExtend() already ran synchronously above,

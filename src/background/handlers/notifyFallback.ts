@@ -45,13 +45,9 @@ export async function notifyChoiceFallback(
     });
     if (typeof id === "string" && id) {
       targets.set(id, { captureId: result.id, groupId: result.groupId });
-      console.debug("[ScreenX] choice notification shown:", id);
     }
-  } catch (e) {
-    console.debug(
-      "[ScreenX] choice notification failed:",
-      e instanceof Error ? e.message : String(e)
-    );
+  } catch {
+      // ignore
   }
 }
 
@@ -62,13 +58,11 @@ export function wireNotificationClicks(): void {
       if (!target) return;
       forget(notificationId);
       if (buttonIndex === 0) {
-        console.debug("[ScreenX] notification action → open editor", target.captureId);
         void openEditorForToastAction(target.captureId, target.groupId).then(
-          () => console.debug("[ScreenX] notification action → editor opened"),
+          undefined,
           (e) => console.error("[ScreenX] notification action → editor open failed:", e instanceof Error ? e.message : String(e))
         );
       } else {
-        console.debug("[ScreenX] notification action → download started", target.captureId);
         void downloadCapture(target.captureId);
       }
     });

@@ -154,16 +154,8 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     }
 
     if (mode === "selected-area") {
-      console.debug("[ScreenX][SelectedArea]", JSON.stringify({
-        phase: "scroll_settled",
-        index: i,
-        requestedY,
-        actualY,
-        controller: controllerType,
-        viewportHeight: 0, // Mocked out to fit previous shape
-      }));
+          // ignore
     }
-
     sendProgress(tabId, {
       mode,
       stage: "Capturing...",
@@ -208,16 +200,11 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     perfCapture += performance.now() - tCaptureStart;
 
     if (mode === "selected-area") {
-      console.debug("[ScreenX][SelectedArea]", JSON.stringify({
-        phase: "captured_chunk",
-        index: i,
-        actualY,
-        dataLength: dataUrl.length,
-      }));
-    } else {
-      console.debug(`[ScreenX] full-page chunk ${chunks.length + 1}/${positions.length} y=${actualY} (requested ${requestedY}) captured ${Math.round(dataUrl.length / 1024)}KB`);
+          // ignore
     }
-
+ else {
+          // ignore
+ }
     chunks.push({ dataUrl, x: recordX, y: recordY });
 
     sendProgress(tabId, {

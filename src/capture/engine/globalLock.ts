@@ -132,10 +132,6 @@ export async function purgeExpiredGlobalLock(): Promise<boolean> {
     const current = await readClaim();
     if (current && current.expiresAt <= Date.now()) {
       await chrome.storage.session.remove([LOCK_KEY]);
-      console.debug("[ScreenX] purged expired capture lock", {
-        owner: current.owner,
-        ageMs: Date.now() - acquiredAtOf(current),
-      });
       return true;
     }
     return false;

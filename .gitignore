@@ -1,21 +1,32 @@
+# Dependencies & build output
 node_modules
 dist
-.DS_Store
-*.log
+coverage/
+*.tsbuildinfo
+
+# Env & secrets — never commit
 .env
 .env.*
-*.tsbuildinfo
-coverage/
 
-# Local Antigravity CLI context dumps (transcripts/logs) — never commit
+# Logs & dumps
+*.log
+*.orig
+*.rej
+
+# Local AI-agent context dumps (transcripts/logs) — never commit
 contextfromantigravitycli/
 
 # Reference repos & working notes — never commit
 friendsrepo/
 docs/
 
+# Analysis reports (bug hunts, audits) — private working files, not product code.
+draft/
+
 # Editor / OS
 .vscode/*
 !.vscode/extensions.json
 .idea/
+.DS_Store
 *.local
+.cache/

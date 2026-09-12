@@ -27,6 +27,52 @@ export function sendToastToActiveTab(toast: ToastOptions): void {
   });
 }
 
+/** Active tab id for flows that must bind follow-ups to the shown tab. Never throws. */
+export async function queryActiveTabIdAsync(): Promise<number | undefined> {
+  try {
+    return await new Promise<number | undefined>((resolve) => {
+      try {
+        queryActiveTabId((id) => resolve(id));
+      } catch {
+        resolve(undefined);
+      }
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Delivery-checked active-tab toast. Returns false when no tab or no
+ * listening content script — callers fall back to a notification instead
+ * of fading silently.
+ */
+export async function sendToastToActiveTabWithDelivery(toast: ToastOptions): Promise<boolean> {
+  try {
+    const tabId = await queryActiveTabIdAsync();
+    if (tabId === undefined) return false;
+    const delivery = await sendToastToTab(tabId, toast);
+    return delivery.delivered;
+  } catch {
+    return false;
+  }
+}
+
+/** Last-resort error surface: system notification. Never throws. */
+export async function notifyErrorFallback(title: string, message: string): Promise<void> {
+  try {
+    await chrome.notifications.create({
+      type: "basic",
+      iconUrl: "icons/icon128.png",
+      title: `ScreenX — ${title}`,
+      message,
+      priority: 2,
+    });
+  } catch {
+    // ignore — nothing left to escalate to
+  }
+}
+
 /**
  * Send a toast to a specific tab, reporting delivery. Resolves false when
  * the tab has no listening content script (stale/missing injection) so
@@ -63,7 +109,7 @@ export async function sendToastToTab(tabId: number, toast: ToastOptions): Promis
       }
     });
     if (!delivery.delivered) {
-      console.debug("[ScreenX] toast not delivered to tab", tabId, "(no listening content script?)");
+          // ignore
     }
     return delivery;
   } catch {

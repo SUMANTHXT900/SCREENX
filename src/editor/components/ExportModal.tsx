@@ -2,6 +2,7 @@
  * Export modal — format/quality choice + download (plan: editor/components).
  * Clipboard copy is always PNG (ClipboardItem requirement).
  */
+import * as React from "react";
 import { X, Download } from "lucide-react";
 import { useSettingsStore, type ExportFormat } from "@/state/useSettingsStore";
 
@@ -21,11 +22,35 @@ const FORMATS: { id: ExportFormat; label: string; hint: string }[] = [
 ];
 
 export default function ExportModal({ open, busy, error, fileName, onClose, onDownload }: Props): React.JSX.Element | null {
-  const { exportFormat, setExportFormat, exportQuality, setExportQuality } = useSettingsStore();
+  const exportFormat = useSettingsStore((s) => s.exportFormat);
+  const setExportFormat = useSettingsStore((s) => s.setExportFormat);
+  const exportQuality = useSettingsStore((s) => s.exportQuality);
+  const setExportQuality = useSettingsStore((s) => s.setExportQuality);
+  const closeRef = React.useRef<HTMLButtonElement>(null);
+  // Dialog semantics: focus the close button on open; Escape closes (and
+  // must not leak to the canvas hotkeys underneath).
+  React.useEffect(() => {
+    if (!open) return;
+    closeRef.current?.focus();
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    // Capture phase: beat the canvas window-level hotkeys to it.
+    document.addEventListener("keydown", onKey, true);
+    return () => {
+      document.removeEventListener("keydown", onKey, true);
+    };
+  }, [open, onClose]);
   if (!open) return null;
 
   return (
     <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Export image"
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
@@ -37,8 +62,10 @@ export default function ExportModal({ open, busy, error, fileName, onClose, onDo
             Export image
           </h2>
           <button
+            ref={closeRef}
             type="button"
             onClick={onClose}
+            aria-label="Close export dialog"
             className="cursor-pointer border-2 border-black bg-white p-1 hover:bg-black hover:text-white"
             title="Close"
           >

@@ -26,7 +26,6 @@ export async function ensureContentScript(tab: chrome.tabs.Tab): Promise<void> {
   }
 
   const ping = await tryPing(tab.id);
-  console.debug(`[ScreenX] ensureContent ping=${ping} tab=`, tab.id);
   if (ping === "ready") {
     await resetTabCaptureState(tab.id);
     return;
@@ -46,7 +45,6 @@ export async function ensureContentScript(tab: chrome.tabs.Tab): Promise<void> {
   }
 
   try {
-    console.debug("[ScreenX] ensureContent injecting content.js into tab", tab.id);
     await chrome.scripting.executeScript({
       target: { tabId: tab.id },
       files: ["content.js"],
@@ -61,7 +59,6 @@ export async function ensureContentScript(tab: chrome.tabs.Tab): Promise<void> {
   }
 
   const retry = await tryPing(tab.id);
-  console.debug(`[ScreenX] ensureContent post-injection ping=${retry} tab=`, tab.id);
   if (retry === "ready") {
     await resetTabCaptureState(tab.id);
     return;

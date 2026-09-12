@@ -31,9 +31,13 @@ describe("boxMath", () => {
   });
 
   test("clampBoxToViewport keeps position inside", () => {
-    const box = clampBoxToViewport({ left: -20, top: 700, width: 100, height: 100 }, 800, 600);
-    expect(box.left).toBe(0);
-    expect(box.top).toBeLessThanOrEqual(599);
-    expect(box.width).toBeGreaterThan(0);
+    // left -20 → 0; top 700 → 599 (vh-1); width unchanged (fits from 0);
+    // height shrinks to the 1px sliver still on screen (600-599).
+    expect(clampBoxToViewport({ left: -20, top: 700, width: 100, height: 100 }, 800, 600)).toEqual({
+      left: 0,
+      top: 599,
+      width: 100,
+      height: 1,
+    });
   });
 });

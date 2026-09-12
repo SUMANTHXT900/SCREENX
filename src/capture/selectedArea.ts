@@ -8,6 +8,7 @@ import { HUD_RESERVE_PX } from "./stitch/limits";
 import { planSegments } from "./planner/segments";
 import { ensureContentScript } from "./client/ensureContent";
 import { sendProgress, sendToContent } from "./client/contentBridge";
+import { sendToast } from "@/messaging/client";
 import { executeCaptureLoop } from "./engine/captureLoop";
 import { globalSession } from "./engine/CaptureSession";
 import { acquireGlobalLock, heartbeatGlobalLock, releaseGlobalLock } from "./engine/globalLock";
@@ -23,6 +24,7 @@ import {
   persistCapture,
   toCaptureError,
 } from "./engine/finalize";
+import { deleteCapture, deleteGroup } from "@/storage/idb";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -31,6 +33,64 @@ import {
 const CONTENT_TIMEOUT_MS = 3500;
 const SCROLL_STABILIZE_MS = 160;
 const SELECTION_TIMEOUT_MS = 120_000;
+
+/** Survives worker restarts so an orphaned selection wait can be closed loudly. */
+const SELECTION_WAIT_KEY = "screenx:selection-wait";
+
+interface SelectionWaitMarker {
+  tabId: number;
+  ts: number;
+}
+
+async function saveSelectionWait(tabId: number): Promise<void> {
+  try {
+    await chrome.storage.session.set({ [SELECTION_WAIT_KEY]: { tabId, ts: Date.now() } satisfies SelectionWaitMarker });
+  } catch {
+    // ignore — recovery is best-effort
+  }
+}
+
+async function clearSelectionWait(): Promise<void> {
+  try {
+    await chrome.storage.session.remove([SELECTION_WAIT_KEY]);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * SW-startup recovery: if a previous worker died mid-selection-wait, its
+ * overlay (if any) belongs to a dead run and its completion event has no
+ * listener. Tear the overlay down and say so — an explicit retry beats a
+ * silent loss. Stale markers clear quietly (overlay long gone).
+ */
+export async function recoverInterruptedSelection(): Promise<void> {
+  try {
+    const stored = await chrome.storage.session.get(SELECTION_WAIT_KEY);
+    const marker = (stored as Record<string, unknown>)[SELECTION_WAIT_KEY] as SelectionWaitMarker | undefined;
+    await clearSelectionWait();
+    if (!marker || typeof marker.tabId !== "number") return;
+    if (Date.now() - marker.ts > SELECTION_TIMEOUT_MS) return;
+    try {
+      chrome.tabs.sendMessage(marker.tabId, { type: "SCREENX_CANCEL_SELECTION" }, () => {
+        void chrome.runtime.lastError;
+      });
+    } catch {
+      // ignore
+    }
+    try {
+      sendToast(marker.tabId, {
+        type: "error",
+        title: "Selection interrupted",
+        message: "The capture worker restarted — please select the area again.",
+      });
+    } catch {
+      // ignore
+    }
+  } catch {
+    // ignore — recovery is best-effort
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Selection via content script
@@ -105,15 +165,18 @@ function waitForSelection(tabId: number): Promise<RegionSelection> {
     const settle = () => {
       cleanup();
       clearPendingSelection(record);
+      void clearSelectionWait();
     };
 
     chrome.runtime.onMessage.addListener(handler as unknown as (m: unknown, s: chrome.runtime.MessageSender, r: (x: unknown) => void) => boolean | void);
+    // Persist the wait so a worker restart can close it loudly instead of
+    // losing the user's completed drag silently (see recoverInterruptedSelection).
+    void saveSelectionWait(tabId);
 
     // Register synchronously (no await before this): a same-tick second
     // trigger supersedes us immediately instead of both waits surviving.
     const prev = registerPendingSelection(record);
     if (prev) {
-      console.debug("[ScreenX][SelectedArea] superseding a stale selection wait");
       try {
         prev.onSuperseded();
       } catch {
@@ -153,7 +216,6 @@ function waitForSelection(tabId: number): Promise<RegionSelection> {
       const ack = res as { ok?: boolean; rendered?: boolean; error?: string } | undefined;
       if (!ack || ack.ok !== true || ack.rendered !== true) {
         settle();
-        console.debug("[ScreenX][SelectedArea] selection UI did not confirm render:", JSON.stringify(ack ?? null));
         reject(
           new CaptureError(
             "CONTENT_SCRIPT_NOT_READY",
@@ -175,7 +237,6 @@ function waitForSelection(tabId: number): Promise<RegionSelection> {
 export function cancelPendingSelection(): void {
   const pending = takePendingSelection();
   if (!pending) return;
-  console.debug("[ScreenX][SelectedArea] cancelling pending selection for a newer trigger");
   try {
     pending.onSuperseded();
   } catch {
@@ -269,11 +330,6 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       // ignore — prepareCapture resolves on its own
     }
 
-    const t0 = performance.now();
-    let perfScroll = 0;
-    let perfCapture = 0;
-    let perfStitch = 0;
-
     // Range targets share the stitcher's frame (scroll + viewport offsets —
     // see selectionRangeToTargets): no container-rect correction here.
     const converted = selectionRangeToTargets(
@@ -314,13 +370,6 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
 
     const normalizedSelection: RangeSelection = { x, width, startY, endY };
 
-    console.debug("[ScreenX][SelectedArea]", JSON.stringify({
-      phase: "selection_received",
-      startY,
-      endY,
-      width,
-      x,
-    }));
 
     const metrics = await withTimeout(
       sendToContent<MeasureResponse>(
@@ -391,27 +440,9 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       totalChunks,
     });
 
-    const capturePlan = {
-      phase: "capture_plan",
-      selection: { startY, endY, height: endY - startY, width, x },
-      viewport: { width: viewportWidth, height: viewportHeight, dpr },
-      totalHeight: metrics.totalHeight,
-      maxScrollY: metrics.maxScrollY,
-      occlusions: { top: occludedTopHeight, bottom: occludedBottomHeight },
-      controller: metrics.controllerType,
-      chunkCount: positions.length,
-      chunks: positions.map((pos, idx) => ({
-        index: idx,
-        requestedY: pos,
-        expectedViewportRange: `${pos} - ${pos + viewportHeight}`,
-      })),
-    };
-    console.debug("[ScreenX][SelectedArea][Plan]", JSON.stringify(capturePlan));
-
     const totalTimeout = calculateTotalTimeout(positions.length, SCROLL_STABILIZE_MS, 600, 2000);
 
     const chunks: StitchChunk[] = [];
-    const perfPlanning = performance.now() - t0;
 
     const loopResult = await executeCaptureLoop({
       tabId: tab.id,
@@ -427,8 +458,6 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     });
 
     chunks.push(...loopResult.chunks);
-    perfScroll = loopResult.perfScroll;
-    perfCapture = loopResult.perfCapture;
 
     sendProgress(tab.id, {
       mode: "selected-area",
@@ -438,7 +467,6 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       totalChunks,
     });
 
-    const tStitchStart = performance.now();
     // Over-tall ranges auto-split into canvas-safe parts stitched from the same chunks.
     const segments = planSegments(normalizedSelection.width, startY, endY, dpr);
     const groupId = segments.length > 1 ? crypto.randomUUID() : undefined;
@@ -479,18 +507,9 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
         ...(groupId ? { groupId, partIndex: seg.index, partTotal: seg.total } : {}),
       });
     }
-    perfStitch = performance.now() - tStitchStart;
-
     const first = parts[0]!;
     first.stoppedEarly = loopResult.stoppedEarly || undefined;
 
-    console.debug("[ScreenX][SelectedArea]", JSON.stringify({
-      phase: "complete",
-      width: first.width,
-      height: first.height,
-      chunkCount: chunks.length,
-      parts: parts.length,
-    }));
 
     sendProgress(tab.id, {
       mode: "selected-area",
@@ -500,32 +519,46 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       totalChunks,
     });
 
-    for (const part of parts) {
-      await persistCapture(part);
+    // Atomic-ish group persist: a quota failure mid-loop must not leave a
+    // partial stack behind (editor/history would render it as complete).
+    const persisted: string[] = [];
+    try {
+      for (const part of parts) {
+        await persistCapture(part);
+        persisted.push(part.id);
+      }
+    } catch (e) {
+      // Best-effort compensation for already-stored siblings, then rethrow.
+      try {
+        if (groupId) await deleteGroup(groupId);
+        else for (const id of persisted) await deleteCapture(id);
+      } catch {
+        // ignore compensation failure
+      }
+      throw e;
     }
 
     // No success toast here: the background handler shows the sticky
     // copy → editor/download choice toast after capture returns.
 
-    const totalTime = performance.now() - t0;
-    const avgChunk = chunks.length > 0 ? (perfScroll + perfCapture) / chunks.length : 0;
-    console.log(`[ScreenX][PERF] type=selected-area chunks=${chunks.length} parts=${parts.length} planning=${Math.round(perfPlanning)}ms scroll=${Math.round(perfScroll)}ms capture=${Math.round(perfCapture)}ms stitch=${Math.round(perfStitch)}ms total=${Math.round(totalTime)}ms avgChunk=${Math.round(avgChunk)}ms`);
-
     return first;
   } catch (e) {
     const err = toCaptureError(e);
-    notifyFailure(tab?.id, err, "Failed to capture selected area.");
+    void notifyFailure(tab?.id, err, "Failed to capture selected area.");
     throw err;
   } finally {
-    // Locks release FIRST and are individually guarded (see visible.ts).
+    // Restore WHILE holding the locks, release after (see visible.ts).
     // sessionHeld: a superseded selection wait owns nothing — releasing
     // unconditionally here would clear a SUCCESSOR's live lock.
     try {
-      if (lockToken) await releaseGlobalLock(lockToken);
-    } catch {
-      // ignore — TTL expires it anyway
+      await finalizeCapture(tab?.id, prepared);
+    } finally {
+      try {
+        if (lockToken) await releaseGlobalLock(lockToken);
+      } catch {
+        // ignore — TTL expires it anyway
+      }
+      if (sessionHeld) globalSession.release();
     }
-    if (sessionHeld) globalSession.release();
-    await finalizeCapture(tab?.id, prepared);
   }
 }

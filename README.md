@@ -1,57 +1,55 @@
 <div align="center">
 
+<img src="public/icons/logo.svg" width="96" alt="ScreenX logo — black tile with capture corners and emerald X" />
+
 # ScreenX
 
-**Premium screenshot capture for Chromium — visible, full-page, and cross-scroll selected-area, with a built-in editor, workspace, and history.**
+**MV3 screenshot extension for Chromium: visible / full-page / selected-area capture, annotation, workspace, and history — 100% local.**
 
 [![Manifest V3](https://img.shields.io/badge/Manifest-V3-8b5cf6)](https://developer.chrome.com/docs/extensions/develop/migrate/what-is-mv3)
-[![React 19](https://img.shields.io/badge/React-19-61dafb)](https://react.dev)
+[![React](https://img.shields.io/badge/React-19-60A5FA)](https://react.dev)
 [![TypeScript](https://img.shields.io/badge/TypeScript-strict-3178c6)](https://www.typescriptlang.org)
-[![Tailwind v4](https://img.shields.io/badge/Tailwind-v4-38bdf8)](https://tailwindcss.com)
-[![Tests](https://img.shields.io/badge/tests-64_passing-22c55e)](#-development)
+[![Tailwind](https://img.shields.io/badge/Tailwind-v4-38bdf8)](https://tailwindcss.com)
+[![Tests](https://img.shields.io/badge/tests-116_passing-4ADE80)](#testing)
+[![pnpm](https://img.shields.io/badge/pnpm-required-FBBF24)](https://pnpm.io)
+[![License](https://img.shields.io/badge/License-MIT-F87171)](#license)
+[![Privacy](https://img.shields.io/badge/privacy-100%25_local-4ADE80)](PRIVACY.md)
 
 </div>
 
 ---
 
-## ✨ Features
+## Features
 
-| | |
+| Feature | What you get |
 |---|---|
-| 📸 **Three capture modes** | **Visible** viewport, **Full page** (auto-scroll + seam-aligned stitching), and **Selected area** (drag a box, extend it across scroll) |
-| 📋 **Instant clipboard** | Screenshot lands on your clipboard on capture — paste anywhere, no detour |
-| 🎛️ **Choice toast** | Glassmorphic in-page card with screenshot thumbnail: **Open in Editor**, **Copy**, **Download** |
-| 🖌️ **Editor** | Annotate and export (PNG/JPEG), copy back to clipboard |
-| 🗂️ **Workspace & History** | Every capture persisted to IndexedDB; grouped multi-part pages, activity log |
-| 🔔 **Never silent** | Progress HUD, render-confirmed toasts, and system-notification fallback when the tab isn't focused |
+| Three capture modes | **Visible** viewport, **Full page** (auto-scroll + seam-aligned stitching), **Selected area** (drag a box, extend across scroll) |
+| Instant clipboard | Screenshot lands on your clipboard on capture — paste anywhere, no detour |
+| Choice toast | In-page card with thumbnail: **Open in Editor**, **Copy**, **Download** |
+| Editor | Annotate (shapes, text, crop) and export PNG/JPEG, copy back to clipboard |
+| Workspace & History | Every capture persisted to IndexedDB; grouped multi-part pages, activity log (rolling 200) |
+| Never silent | Progress HUD, render-confirmed toasts, system-notification fallback when the tab isn't focused |
+
+## Shortcuts
+
+| Action | Shortcut |
+|---|---|
+| Capture visible area | `Alt` + `Shift` + `S` |
+| Capture full page | `Alt` + `Shift` + `F` |
+| Capture selected area | `Alt` + `Shift` + `C` |
+| Cancel selection | `Esc` |
+
+Remappable at `chrome://extensions/shortcuts`. If a shortcut row appears blank, re-assign it there — Chrome sometimes drops suggested keys on reinstall.
+
+**Flow:** trigger from popup or shortcut (popup closes immediately, capture runs in the background) → watch the **progress HUD** (stay on the tab until it finishes) → image is **auto-copied**, choice toast offers Editor / Copy / Download → everything lands in **Workspace** and **History**.
 
 ---
 
-## ⌨️ Usage
-
-| Action | Popup | Shortcut |
-|---|---|---|
-| Capture visible area | **Visible** | `Alt` + `Shift` + `V` |
-| Capture full page | **Full Page** | `Alt` + `Shift` + `F` |
-| Capture selected area | **Selected Area** | `Alt` + `Shift` + `S` |
-
-1. Trigger a capture from the popup or a shortcut — the popup closes immediately, capture runs in the background.
-2. Watch the **progress HUD** (stay on the tab until it finishes).
-3. Image is **auto-copied**; the **choice toast** offers Editor / Copy / Download.
-4. Find everything later in **Workspace** and **History**.
-
-> **Notes**
-> - `chrome://`, Web Store, and other browser pages are protected — capture on a normal website.
-> - Clipboard needs a focused `https` page; if auto-copy misses, tap **Copy** in the toast.
-> - Windows Clipboard History (`Win` + `V`) sometimes skips images OS-wide — paste still works everywhere.
-
----
-
-## 🚀 Quick start
+## Quickstart
 
 ```bash
-npm install        # or: pnpm install
-npm run build      # typecheck + production build → dist/
+pnpm install
+pnpm build      # typecheck + production build → dist/
 ```
 
 Load unpacked in Chrome:
@@ -60,51 +58,126 @@ Load unpacked in Chrome:
 2. **Load unpacked** → select the `dist/` folder
 3. Pin ScreenX, reload any open tabs once (content-script protocol check)
 
+npm alternative (one-liner): `npm install && npm run build` — then load `dist/` as above. pnpm is the canonical manager (CI uses `pnpm install --frozen-lockfile`).
+
 ---
 
-## 🧭 How it works
+## How it works
 
 ```mermaid
 flowchart LR
-    A[Popup / Shortcuts] --> B[Background SW<br/>capture handler]
-    B --> C{Mode}
-    C -->|visible| D[Single shot]
-    C -->|full-page| E[Scroll loop + stitch]
-    C -->|selected-area| F[Drag overlay + range loop]
-    D & E & F --> G[Auto-copy to clipboard]
-    G --> H[Choice toast:<br/>Editor / Copy / Download]
-    H --> I[(IndexedDB + Workspace)]
+    A[Trigger: popup / shortcut] --> B[Background service worker<br/>command + capture router]
+    B --> C[Content overlay<br/>measure, scroll control, selection, HUD]
+    C --> D[Capture engine<br/>scroll loop + locks + heartbeat]
+    D --> E[Stitcher<br/>pixel-aligned seams]
+    E --> F[(IndexedDB<br/>blobs + history)]
+    E --> G[Choice toast<br/>Editor / Copy / Download]
+    G --> H[Editor / Workspace / History]
 ```
 
 - **Capture** (`src/capture/`) — planner (positions, occlusions, timeouts) → engine (scroll loop, locks, heartbeat) → stitcher (pixel-aligned canvas seams, auto-split oversized pages).
 - **Content script** (`src/content/`) — classic single-file bundle: measurement, scroll control with settle-then-read, drag-selection overlay, progress HUD, toasts.
-- **Messaging** (`src/messaging/`) — versioned typed protocol (`CONTENT_PROTOCOL_VERSION`) with stale-tab detection.
+- **Messaging** (`src/messaging/`) — versioned typed protocol with stale-tab detection.
 - **Storage** (`src/storage/`) — IndexedDB blobs + session-pointer handoff + history log.
 
 ---
 
-## 🗂️ Project structure
+## Project structure
 
-| Area | Path |
-|---|---|
-| Capture entry + engines | `src/capture/` (`client/` bridge · `planner/` · `engine/` · `stitch/`) |
-| Content script | `src/content/` (`dom/` · `scroll/` · `selection/` · `ui/`) |
-| Messaging protocol | `src/messaging/` |
-| Storage | `src/storage/` (`idb/` · `handoff/` · `history/`) |
-| Background worker | `src/background/` (router + `handlers/`) |
-| UI surfaces | `src/popup/` · `src/editor/` · `src/workspace/` · `src/history/` |
-| Shared state / types | `src/state/` · `src/types/` |
+```
+src/
+  background/   # service-worker router + handlers (capture, toast, copy, download, notify)
+  capture/      # planner, engine (scroll loop/locks/heartbeat), stitcher, clipboard
+  content/      # classic content bundle: dom, scroll, selection overlay, HUD, toasts
+  messaging/    # versioned typed protocol + client (stale-tab detection)
+  storage/      # IndexedDB repos, session handoff pointers, history log, filenames
+  popup/        # toolbar popup (triggers capture, closes immediately)
+  editor/       # annotation surface (shapes, text, crop) + PNG/JPEG export
+  workspace/    # persisted captures, grouped multi-part pages
+  history/      # rolling activity log (200 entries, tombstoned deletes)
+  state/        # zustand stores (settings, capture status)
+  components/   # shared neobrutalist UI primitives
+  types/ utils/ # shared types, helpers
+tests/          # vitest suites, one file per domain
+```
 
 Conventions: `@/*` → `src/*` · every domain has an `index.ts` barrel · `content.js` must stay a classic bundle (no `import` — enforced by build guard + test).
 
 ---
 
-## 🛠️ Development
+## Development
 
-| Script | What |
+| Script | Command | What it does |
+|---|---|---|
+| `dev` | `pnpm dev` | watch build to `dist/` (vite, development mode) |
+| `build` | `pnpm build` | `tsc -b && vite build` → production `dist/` |
+| `preview` | `pnpm preview` | preview the production build locally |
+| `typecheck` | `pnpm typecheck` | app-only typecheck (`tsconfig.app.json`, no emit) |
+| `typecheck:all` | `pnpm typecheck:all` | full project typecheck (`tsc -b`) |
+| `lint` | `pnpm lint` | eslint over the repo |
+| `test` | `pnpm test` | `vitest run` — full suite once |
+| `test:watch` | `pnpm test:watch` | vitest in watch mode |
+| `clean` | `pnpm clean` | remove `dist/` |
+
+**Gates (CI, in order):** `pnpm typecheck` → `pnpm test` → `pnpm lint` → `pnpm build`. Run all four before opening a PR. CI runs on pushes to `main`/`dev` and all pull requests.
+
+### Testing
+
+vitest, **116 tests across 19 files** (`tests/`). Key suites: `modular` (28, stitch/clipboard/selection math), `clipboardTarget` (11), `synthetic` + `contentGuardRegex` (9 each), `activityLog` (8), `editorShapes` + `downloadName` (7 each), `copyAttempt` (5, incl. focus-retry timing), `boxMath` (4).
+
+<details>
+<summary>All suites</summary>
+
+`activityLog` · `boxMath` · `clipboardTarget` · `clipboardWrite` · `content-bundle` (classic-bundle guard) · `contentGuardRegex` · `copyAttempt` · `downloadName` · `editorShapes` · `globalLock` · `grouping` · `modular` · `protocol` · `selectionPending` · `sessionLock` · `shapeGuard` · `stitch_math` · `synthetic` · `worker-dynamic-import`
+
+</details>
+
+---
+
+## Privacy
+
+**100% local.** No servers, no accounts, no analytics, no telemetry — screenshots and metadata never leave your device. Full policy: [`PRIVACY.md`](PRIVACY.md) (also linked in the extension footer).
+
+| Permission | Why |
 |---|---|
-| `npm run dev` | watch build to `dist/` |
-| `npm run build` | `tsc -b && vite build` |
-| `npm run typecheck` | app typecheck |
-| `npm run lint` | eslint |
-| `npm test` | `vitest run` (planner, stitch math, locks, clipboard, selection) |
+| `activeTab` | Capture the page you invoke ScreenX on; show toasts there |
+| `storage` | Persist captures, history, settings, drafts (local + session) |
+| `scripting` | Inject the capture/selection overlay content script into the active tab |
+| `clipboardWrite` | Auto-copy screenshots to clipboard without a click each time |
+| `downloads` | Save screenshots to your downloads folder |
+| `notifications` | Fallback announcements when a capture finishes while its tab isn't visible |
+
+No host permissions — ScreenX can't read browsing history or run on pages you never invoke it on.
+
+---
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Captures fail on tabs open before install/update | Reload the tab once (content-script protocol check rejects stale tabs) |
+| Shortcut row is blank in `chrome://extensions/shortcuts` | Re-assign it manually — Chrome drops suggested keys on reinstall |
+| Nothing happens on `chrome://`, Web Store, or other browser pages | Expected — those pages are protected; capture on a normal website |
+| Clipboard auto-copy missed / `Win` + `V` shows no image | Clipboard needs a focused `https` page — hit **Copy** in the toast; Windows history sometimes skips images OS-wide, but paste still works |
+
+<details>
+<summary>Still stuck?</summary>
+
+1. Reload the tab, retry the capture, watch the progress HUD for the error step.
+2. Check Workspace/History — the capture may have persisted even if the toast missed.
+3. Open an issue with: Chrome version, capture mode, page type, and HUD/toast behavior.
+
+</details>
+
+---
+
+## Contributing
+
+- Branch from / target **`dev`**; `main` is release-only.
+- Run the gates before pushing: `pnpm typecheck && pnpm test && pnpm lint && pnpm build`.
+- Keep `content.js` a **classic bundle** — no `import` statements (build guard + `content-bundle` test enforce this).
+- Keep captures local-only: no network calls, no new permissions without a `PRIVACY.md` update.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

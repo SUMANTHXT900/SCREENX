@@ -13,12 +13,19 @@ import { encodeForClipboard } from "@/capture/clipboard";
 import { attemptCopyWithFocus, readTab } from "./copyAttempt";
 import { getCapture } from "@/storage/idb";
 import { CaptureError } from "@/types/capture";
-import { sendToastToActiveTab, sendToastToTab } from "./commandHandler";
+import {
+  sendToastToActiveTab,
+  sendToastToActiveTabWithDelivery,
+  sendToastToTab,
+  notifyErrorFallback,
+  queryActiveTabIdAsync,
+} from "./commandHandler";
 import { buildChoiceToast, type ChoiceInput } from "./choiceToast";
 import { classifyClipboardTarget } from "./clipboardTarget";
 import { clearCaptureBadge } from "@/messaging/client";
 import { describeGlobalLock } from "@/capture/engine/globalLock";
 import { notifyChoiceFallback } from "./notifyFallback";
+import { armToastActions } from "./toastTokens";
 
 const PENDING_CHOICE_KEY = "screenx:choice-pending";
 const PENDING_CHOICE_TTL_MS = 10 * 60 * 1000;
@@ -63,11 +70,10 @@ export async function recoverPendingChoice(): Promise<void> {
       await clearPendingChoice();
       return;
     }
-    console.debug("[ScreenX] recovering unannounced capture:", pending.captureId);
     await showChoiceToast(record, false);
     await clearPendingChoice();
-  } catch (e) {
-    console.debug("[ScreenX] pending-choice recovery skipped:", e instanceof Error ? e.message : String(e));
+  } catch {
+      // ignore
   }
 }
 
@@ -83,11 +89,9 @@ async function showChoiceToast(
 ): Promise<{ delivered: boolean; focused?: boolean }> {
   const toast = buildChoiceToast(result, copied, copyDataUrl, copyNote);
   if (result.sourceTabId !== undefined) {
+    // Bind the buttons to the tab shown the toast (see toastTokens).
+    armToastActions(toast.actions, result.id, result.groupId, result.sourceTabId);
     const delivery = await sendToastToTab(result.sourceTabId, toast);
-    console.debug(
-      `[ScreenX] choice toast delivered=${delivery.delivered} focused=${delivery.focused} tab=`,
-      result.sourceTabId
-    );
     return delivery;
   }
   return { delivered: false };
@@ -98,19 +102,16 @@ export async function handleCapture(
   label: string
 ): Promise<void> {
   try {
-    console.debug(`[ScreenX] ${label} → capture started`);
     // A selection wait from an earlier trigger holds no locks but owns the
     // tab overlay: supersede it first so a re-click (or a different mode)
     // replaces the stale run instead of colliding with it. No-op normally.
     cancelPendingSelection();
     const result = await capture(type);
-    console.debug(`[ScreenX] ${label} → captured:`, result.id);
 
     // Persist-first guarantee: if this worker dies anywhere below, the next
     // startup re-shows the choice toast instead of fading silently.
     await savePendingChoice(result.id);
 
-    console.debug(`[ScreenX] ${label} → copying to clipboard…`);
     // Encode once: the bytes feed the automatic send AND ride along in the
     // Copy button, so a click retries with a synchronous in-gesture write.
     const copyDataUrl = await encodeForClipboard(result.blob);
@@ -121,7 +122,6 @@ export async function handleCapture(
       // button degrades to the worker round trip, which can't help here, so
       // say so up front and point at Download.
       copyNote = "Image is too large for the clipboard — use Download.";
-      console.debug(`[ScreenX] ${label} → clipboard skipped: no encodable bytes`);
     } else if (result.sourceTabId !== undefined) {
       // Pre-classify the tab: restricted pages (chrome://, Web Store) block
       // injection and http: pages have no navigator.clipboard — attempting
@@ -130,7 +130,6 @@ export async function handleCapture(
       const tab = await readTab(tabId);
       const target = classifyClipboardTarget(tab.url);
       if (target.kind !== "writable") {
-        console.debug(`[ScreenX] ${label} → clipboard skipped: ${target.reason}`);
         copyNote =
           target.kind === "insecure"
             ? "Clipboard needs a secure (https) page — use Download, or copy from the Editor."
@@ -139,23 +138,23 @@ export async function handleCapture(
         // Shared attempt helper: real window focus + bounded retries (only
         // on unfocused reports — a focused refusal stops after attempt one).
         // attemptCopyWithFocus logs each attempt with this label.
-        const attempt = await attemptCopyWithFocus(tabId, copyDataUrl, tab.windowId, `${label} [${result.id}]`);
+        const attempt = await attemptCopyWithFocus(tabId, copyDataUrl, tab.windowId);
         copied = attempt.copied;
         if (!copied) {
           copyNote = "Auto-copy missed (the tab wasn't focused) — tap Copy.";
         }
       }
     }
-    console.debug(`[ScreenX] ${label} → clipboard copied=${copied}`);
 
-    console.debug(`[ScreenX] ${label} → sending choice toast to tab`, result.sourceTabId);
     const { delivered, focused } = await showChoiceToast(result, copied, copyDataUrl ?? undefined, copyNote);
     if (!delivered) {
       // Same full toast (buttons included) via the active tab — wherever it
       // renders, the actions still work — plus a system notification so the
       // result is visible even when the user isn't looking at any tab.
-      console.debug(`[ScreenX] ${label} → direct toast failed, falling back to active tab + notification`);
-      sendToastToActiveTab(buildChoiceToast(result, copied, copyDataUrl ?? undefined, copyNote));
+      // Buttons are bound to the tab actually shown the toast.
+      const fallbackToast = buildChoiceToast(result, copied, copyDataUrl ?? undefined, copyNote);
+      armToastActions(fallbackToast.actions, result.id, result.groupId, await queryActiveTabIdAsync());
+      sendToastToActiveTab(fallbackToast);
       await notifyChoiceFallback(result, copied, copyNote);
       console.warn(
         `[ScreenX] ${label} → choice toast NOT confirmed delivered for capture ${result.id}; ` +
@@ -164,16 +163,13 @@ export async function handleCapture(
     } else if (focused === false) {
       // Rendered, but the document isn't focused (DevTools open, other window
       // on top) — the user can't see it, so mirror to a notification.
-      console.debug(`[ScreenX] ${label} → tab unfocused, mirroring choice to notification`);
       await notifyChoiceFallback(result, copied, copyNote);
     }
     await clearPendingChoice();
-    console.debug(`[ScreenX] ${label} → done (delivered=${delivered})`);
   } catch (e) {
     const err = e instanceof CaptureError ? e : new CaptureError("CAPTURE_FAILED", String(e), { cause: e as Error });
     // User cancelled is not an error — just log info
     if (err.code === "USER_CANCELLED") {
-      console.debug(`[ScreenX] ${label} cancelled by user`);
       return;
     }
     // Busy, not broken: surface HOW LONG the other capture has held the lock
@@ -182,22 +178,23 @@ export async function handleCapture(
     if (err.code === "CAPTURE_IN_PROGRESS") {
       const lock = await describeGlobalLock();
       const age = lock ? ` (other capture running ~${Math.round(lock.ageMs / 1000)}s)` : "";
-      console.debug(`[ScreenX] ${label} busy${age}`);
-      sendToastToActiveTab({
-        type: "error",
-        title: "Already Capturing",
-        message: `A capture is already running${age ? ` — started ~${Math.round(lock!.ageMs / 1000)}s ago` : ""}. Wait for it to finish, then try again.`,
-      });
+      const title = "Already Capturing";
+      const message = `A capture is already running${age ? ` — started ~${Math.round(lock!.ageMs / 1000)}s ago` : ""}. Wait for it to finish, then try again.`;
+      const delivered = await sendToastToActiveTabWithDelivery({ type: "error", title, message });
+      if (!delivered) await notifyErrorFallback(title, message);
       return;
     }
     console.error(`[ScreenX] ${label} failed [${err.code}]:`, err.message, err.cause ?? "");
 
-    // Send toast to the active tab
-    sendToastToActiveTab({
+    // Delivery-checked: on listener-less tabs (restricted pages, stale
+    // content scripts) the toast can't render — escalate to a notification
+    // instead of failing silently like the old fire-and-forget send.
+    const delivered = await sendToastToActiveTabWithDelivery({
       type: "error",
       title: "Capture Error",
       message: err.message,
     });
+    if (!delivered) await notifyErrorFallback("Capture Error", err.message);
   } finally {
     // Badge must never stick: the loop may have set 100% and died after.
     clearCaptureBadge();

@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- ScreenX mark: black tile + cream keyline, capture corners, emerald X -->
+  <rect x="2" y="2" width="124" height="124" rx="30" fill="#FFF6E9"/>
+  <rect x="8" y="8" width="112" height="112" rx="24" fill="#000000"/>
+  <g stroke="#FFFFFF" stroke-width="11" stroke-linecap="round" fill="none">
+    <path d="M56 32 H32 V56"/>
+    <path d="M72 32 H96 V56"/>
+    <path d="M56 96 H32 V72"/>
+    <path d="M72 96 H96 V72"/>
+  </g>
+  <g stroke="#4ADE80" stroke-width="12" stroke-linecap="round">
+    <path d="M50 50 L78 78"/>
+    <path d="M78 50 L50 78"/>
+  </g>
+</svg>

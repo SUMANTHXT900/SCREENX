@@ -59,15 +59,12 @@ export interface CopyAttemptResult {
  * Retries ONLY when the tab reports unfocused (a timing race focus can still
  * win); a focused refusal or structural error stops after the first attempt
  * — retrying those is pointless. Never throws.
- *
- * `logPrefix` correlates attempts in the console (pass the capture label).
  */
-export async function attemptCopyWithFocus(
-  tabId: number,
-  dataUrl: string,
-  windowId: number | undefined,
-  logPrefix: string
-): Promise<CopyAttemptResult> {
+    export async function attemptCopyWithFocus(
+      tabId: number,
+      dataUrl: string,
+      windowId: number | undefined
+    ): Promise<CopyAttemptResult> {
   let lastReport: CopyReport | undefined;
   let attempts = 0;
   for (let attempt = 0; attempt < COPY_ATTEMPT_SETTLES_MS.length; attempt++) {
@@ -84,13 +81,8 @@ export async function attemptCopyWithFocus(
         : COPY_ATTEMPT_TIMEOUT_MS;
     lastReport = await sendCopyImageReport(tabId, dataUrl, timeout);
     if (lastReport.ok) {
-      if (attempt > 0) console.debug(`[ScreenX] ${logPrefix} → clipboard retry ${attempt + 1} succeeded`);
       return { copied: true, lastReport, attempts };
     }
-    console.debug(`[ScreenX] ${logPrefix} → clipboard attempt ${attempt + 1} failed:`, lastReport.error ?? "refused", {
-      focused: lastReport.focused,
-      transientActivation: lastReport.transientActivation,
-    });
     if (lastReport.focused !== false) break;
   }
   return { copied: false, lastReport, attempts };

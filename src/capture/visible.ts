@@ -84,7 +84,6 @@ export async function captureVisible(): Promise<CaptureResult> {
       totalChunks,
     });
 
-    console.debug("[ScreenX] visible capture", JSON.stringify({ windowId: tab.windowId, dataUrlLength: dataUrl.length }));
 
     let width: number | undefined;
     let height: number | undefined;
@@ -141,25 +140,29 @@ export async function captureVisible(): Promise<CaptureResult> {
     return result;
   } catch (e) {
     const err = toCaptureError(e);
-    notifyFailure(tab?.id, err, "Failed to capture visible area.");
+    void notifyFailure(tab?.id, err, "Failed to capture visible area.");
     throw err;
   } finally {
-    // Locks release FIRST and are individually guarded: a throwing HUD call
-    // must never skip them (that leak is the phantom CAPTURE_IN_PROGRESS).
-    // A successor capture starting before the HUD hides below is harmless —
-    // HUD show/hide is idempotent per tab.
+    // Restore WHILE holding the locks, release after: a successor must not
+    // PREPARE (and start scrolling) while our retried RESTORE is still in
+    // flight — it would reset prepared state and scroll away mid-run.
+    // Releases are finally-nested + individually guarded so a throwing HUD
+    // call can never leak them (that leak is the phantom CAPTURE_IN_PROGRESS).
     try {
-      if (lockToken) await releaseGlobalLock(lockToken);
-    } catch {
-      // ignore — TTL expires it anyway
-    }
-    globalSession.release();
-    // Visible has no engine finalize step — clear the badge here so the
-    // toolbar never sticks at 100% (progress sets it, nothing else clears it).
-    clearCaptureBadge();
-    if (tab?.id !== undefined) {
-      await hideProgressHud(tab.id);
-      await restoreCapture(tab.id);
+      // Visible has no engine finalize step — clear the badge here so the
+      // toolbar never sticks at 100% (progress sets it, nothing else clears it).
+      clearCaptureBadge();
+      if (tab?.id !== undefined) {
+        await hideProgressHud(tab.id);
+        await restoreCapture(tab.id);
+      }
+    } finally {
+      try {
+        if (lockToken) await releaseGlobalLock(lockToken);
+      } catch {
+        // ignore — TTL expires it anyway
+      }
+      globalSession.release();
     }
   }
 }

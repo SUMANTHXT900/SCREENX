@@ -22,16 +22,12 @@ import { claimCopySlot, dataUrlToBlob } from "./clipboardWrite.js";
  */
 const CONTENT_PROTOCOL_VERSION = 5;
 
-console.debug("[ScreenX] content script loaded", {
-  url: location.href,
-  timestamp: Date.now(),
-  proto: CONTENT_PROTOCOL_VERSION,
-});
 
 // Guard against double injection (for scripting fallback)
 if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXContentScriptLoaded) {
-  console.debug("[ScreenX] content script already loaded, skipping");
-} else {
+  // ignore
+}
+ else {
   (window as unknown as { __screenXContentScriptLoaded: boolean }).__screenXContentScriptLoaded = true;
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -63,8 +59,9 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               );
               setActiveScrollController(controller);
               try {
-                console.debug("[ScreenX] container resolved", controller.describe());
-              } catch {
+                              // ignore
+              }
+ catch {
                 // ignore
               }
               sendResponse({ ok: true });
@@ -91,12 +88,6 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
             } catch {
               transient = false;
             }
-            console.debug("[ScreenX] COPY_IMAGE received", {
-              chars: typeof dataUrl === "string" ? dataUrl.length : -1,
-              focused,
-              transientActivation: transient,
-              seq: typeof seq === "number" ? seq : "none",
-            });
             try {
               if (typeof navigator.clipboard?.write !== "function") {
                 sendResponse({ ok: false, error: "clipboard-unavailable", focused, transientActivation: transient });
@@ -106,16 +97,13 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               // block on strict sites (a site-dependent intermittent failure).
               const blob = dataUrlToBlob(dataUrl as string);
               if (!claimCopySlot(seq)) {
-                console.debug("[ScreenX] COPY_IMAGE superseded by a newer copy — skipping write");
                 sendResponse({ ok: false, error: "superseded", focused, transientActivation: transient });
                 break;
               }
               await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
-              console.debug("[ScreenX] COPY_IMAGE clipboard write ok=true");
               sendResponse({ ok: true, focused, transientActivation: transient });
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
-              console.debug("[ScreenX] COPY_IMAGE clipboard write ok=false:", msg, { focused });
               sendResponse({ ok: false, error: msg, focused, transientActivation: transient });
             }
             break;
@@ -143,7 +131,6 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
             break;
           }
           case "SCREENX_START_SELECTION": {
-            console.debug("[ScreenX] START_SELECTION received — entering selection mode");
             // Render acknowledgment: the worker must know the overlay REALLY
             // mounted — transport success alone left "no selection UI, silent
             // hang" undiagnosable. A stale content script (extension updated,
@@ -153,11 +140,10 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               const refs = getOverlay();
               const rendered = !!refs && refs.dim.isConnected === true;
               if (!rendered) {
-                console.debug("[ScreenX] START_SELECTION overlay failed to mount");
+                              // ignore
               }
               sendResponse({ ok: rendered, rendered, ...(!rendered ? { error: "overlay-mount-failed" } : {}) });
             } catch (e) {
-              console.debug("[ScreenX] START_SELECTION enter failed:", e instanceof Error ? e.message : String(e));
               sendResponse({ ok: false, rendered: false, error: e instanceof Error ? e.message : String(e) });
             }
             break;
@@ -213,7 +199,6 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               sendResponse({ ok: true });
               break;
             }
-            console.debug("[ScreenX] TOAST received:", t.title ?? t.type, "| actions:", t.actions?.length ?? 0);
             try {
               showToast(t);
               // Report the honest render result: delivery must mean painted,
@@ -230,6 +215,9 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
             // Fallback for large captures: chrome.downloads.download can't
             // handle data URLs beyond ~50MB. Create a Blob URL in the page
             // context and trigger a synthetic <a download> click.
+            // Sync base64 decode (NOT fetch): fetch(data:) is subject to the
+            // page CSP (connect-src without data: rejects), the same reason
+            // the clipboard path decodes synchronously.
             const { dataUrl: dlDataUrl, filename: dlFilename } = message as {
               dataUrl?: string;
               filename?: string;
@@ -239,8 +227,7 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               break;
             }
             try {
-              const res = await fetch(dlDataUrl);
-              const blob = await res.blob();
+              const blob = dataUrlToBlob(dlDataUrl);
               const blobUrl = URL.createObjectURL(blob);
               const a = document.createElement("a");
               a.href = blobUrl;

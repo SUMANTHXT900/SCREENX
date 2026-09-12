@@ -1,11 +1,13 @@
 import * as React from "react";
-import { ArrowLeft, ImageOff, Clock, Monitor, ScrollText, ExternalLink, Loader2, Library, ZoomIn, ZoomOut, Maximize, Crop } from "lucide-react";
+import { ArrowLeft, ImageOff, Clock, Monitor, ScrollText, ExternalLink, Loader2, Library, Maximize, Crop } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { getPendingCapture, getLatestPendingCapture } from "@/storage/captureHandoff";
 import { getCapturesByGroup } from "@/storage/idb/capturesRepo";
 import type { PendingCapture } from "@/types";
-import type { Shape } from "./state/useEditorStore";
+import { isValidShape } from "./state/shapeGuard";
 import type { AnnotationTool } from "./tools";
+import { buildTag } from "@/version";
+import { captureFileBase } from "@/storage/downloadName";
 import { useEditorStore } from "./state/useEditorStore";
 import { useSettingsStore } from "@/state/useSettingsStore";
 import Toolbar from "./components/Toolbar";
@@ -31,15 +33,33 @@ function workspaceUrl(): string {
 
 const ZOOM_STEPS: { label: string; value: Zoom }[] = [
   { label: "Fit", value: "fit" },
-  { label: "25%", value: 0.25 },
-  { label: "50%", value: 0.5 },
   { label: "100%", value: 1 },
-  { label: "200%", value: 2 },
 ];
 
 /** chrome.storage.local key for per-capture annotation drafts. */
 function annotationsKey(id: string): string {
   return `screenx:annotations:${id}`;
+}
+
+/** Hostname for display — never throws on malformed stored URLs. */
+function safeHost(url: string | undefined): string {
+  if (!url) return "unknown host";
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "unknown host";
+  }
+}
+
+/** Link target allowlist — stored URLs are tab-supplied, not trusted. */
+function safeHref(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+  try {
+    const protocol = new URL(url).protocol;
+    return protocol === "http:" || protocol === "https:" || protocol === "file:" ? url : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 interface AnnotationsDraft {
@@ -73,6 +93,40 @@ export default function EditorApp(): React.JSX.Element {
   React.useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
+
+  // Self-heal against stale code: extension pages keep their JS until the
+  // tab reloads, so an old editor tab would otherwise run dead code forever
+  // (and report bugs that no longer exist). Poll the LIVE manifest version;
+  // a mismatch means the extension updated/rebuilt underneath us — reload to
+  // match. Annotation drafts persist continuously, so in-flight work
+  // restores after the reload; the crop-revert snapshot does not survive,
+  // which is acceptable (it references pre-reload blobs anyway).
+  const loadedVersion = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    try {
+      loadedVersion.current =
+        typeof chrome !== "undefined" && chrome.runtime?.getManifest
+          ? chrome.runtime.getManifest().version
+          : null;
+    } catch {
+      loadedVersion.current = null;
+    }
+    if (!loadedVersion.current) return;
+    const timer = setInterval(() => {
+      try {
+        const now =
+          typeof chrome !== "undefined" && chrome.runtime?.getManifest
+            ? chrome.runtime.getManifest().version
+            : null;
+        if (now && now !== loadedVersion.current) {
+          window.location.reload();
+        }
+      } catch {
+        // ignore
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -191,9 +245,7 @@ export default function EditorApp(): React.JSX.Element {
   // refire onLoad, leaving totalW=1px (the "image disappeared" bug).
   const imageUrls = React.useMemo(() => parts.map((p) => p.url), [parts]);
   const fileBase = capture
-    ? capture.groupId
-      ? `screenx-group-${capture.groupId.slice(0, 8)}`
-      : `screenx-${capture.id.slice(0, 8)}`
+    ? captureFileBase({ sourceUrl: capture.sourceUrl, type: capture.type, createdAt: capture.createdAt })
     : "screenx";
 
   const applyCrop = React.useCallback(async () => {
@@ -205,6 +257,11 @@ export default function EditorApp(): React.JSX.Element {
     const cy = Math.round(crop.y);
     const cw = Math.round(crop.w);
     const ch = Math.round(crop.h);
+    // Ownership rule: snapshot urls must stay alive until revert (or a newer
+    // snapshot replaces them). Revoking the original here is what produced
+    // the broken-image-on-revert bug — the snapshot held the same url.
+    const snapshotUrls = new Set(parts.map((p) => p.url));
+    const prevSnap = cropSnapshot.current;
     try {
       // Snapshot for one-step revert (crop bakes pixels + annotations).
       cropSnapshot.current = { parts, shapes: st.shapes };
@@ -227,15 +284,21 @@ export default function EditorApp(): React.JSX.Element {
         const canvas = renderComposite(img, [], { x: cx, y: cy, w: cw, h: ch });
         const blob = await canvasToBlob(canvas, "png", 1);
         nextUrl = URL.createObjectURL(blob);
-        if (first.url.startsWith("blob:")) {
-          try {
-            URL.revokeObjectURL(first.url);
-          } catch {
-            // ignore
-          }
-        }
         // Shift annotations into cropped coordinates so they stay put.
         st.commit(offsetShapes(st.shapes, -cx, -cy));
+      }
+      // Retire the PREVIOUS snapshot's urls (a crop-over-crop orphan) — but
+      // never urls the new snapshot still references (see ownership rule).
+      if (prevSnap) {
+        for (const p of prevSnap.parts) {
+          if (!snapshotUrls.has(p.url) && p.url.startsWith("blob:")) {
+            try {
+              URL.revokeObjectURL(p.url);
+            } catch {
+              // ignore
+            }
+          }
+        }
       }
       st.setPendingCrop(null);
       st.select(null);
@@ -243,25 +306,34 @@ export default function EditorApp(): React.JSX.Element {
       setCanRevertCrop(true);
     } catch (e) {
       cropSnapshot.current = null;
-      setExportError(e instanceof Error ? e.message : String(e));
+      setCanRevertCrop(false);
+      const msg = e instanceof Error ? e.message : String(e);
+      setExportError(msg);
       setExportOpen(true);
     }
   }, [parts, multiPart]);
 
   const revertCrop = React.useCallback(() => {
     const snap = cropSnapshot.current;
-    if (!snap) return;
-    const current = parts[0];
-    if (current && current.url.startsWith("blob:")) {
-      try {
-        URL.revokeObjectURL(current.url);
-      } catch {
-        // ignore
+    if (!snap) {
+      return;
+    }
+    // Revoke only urls the snapshot does NOT reference (the crop results).
+    // The snapshot's own urls stay alive — revoking them is the old bug.
+    const keep = new Set(snap.parts.map((p) => p.url));
+    for (const part of parts) {
+      if (!keep.has(part.url) && part.url.startsWith("blob:")) {
+        try {
+          URL.revokeObjectURL(part.url);
+        } catch {
+          // ignore
+        }
       }
     }
     setParts(snap.parts);
     useEditorStore.setState({
-      shapes: Array.isArray(snap.shapes) ? (snap.shapes as Shape[]) : [],
+      // Guard like drafts: the snapshot may predate the current renderer.
+      shapes: Array.isArray(snap.shapes) ? snap.shapes.filter(isValidShape) : [],
       past: [],
       future: [],
       selectedId: null,
@@ -301,11 +373,11 @@ export default function EditorApp(): React.JSX.Element {
       }, 10_000);
       setExportOpen(false);
     } catch (e) {
-      setExportError(
+      const msg =
         e instanceof Error
           ? `${e.message} Tip: absurdly tall stacks can exceed canvas limits — download parts individually from Workspace.`
-          : String(e)
-      );
+          : String(e);
+      setExportError(msg);
     } finally {
       setExportBusy(false);
     }
@@ -320,19 +392,11 @@ export default function EditorApp(): React.JSX.Element {
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
       copiedTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch (e) {
-      setExportError(e instanceof Error ? e.message : "Copy failed — clipboard access was denied.");
+      const msg = e instanceof Error ? e.message : "Copy failed — clipboard access was denied.";
+      setExportError(msg);
       setExportOpen(true);
     }
   }, [renderForExport]);
-
-  const cycleZoom = React.useCallback((dir: 1 | -1) => {
-    setZoom((z) => {
-      const order: Zoom[] = ["fit", 0.25, 0.5, 1, 2];
-      const i = order.indexOf(z);
-      const next = i === -1 ? 0 : (i + dir + order.length) % order.length;
-      return order[next]!;
-    });
-  }, []);
 
   // Persist annotation drafts per capture/group so a refresh or accidental
   // close doesn't lose work. Restored only when the part count matches.
@@ -376,7 +440,7 @@ export default function EditorApp(): React.JSX.Element {
         }
         if (!cancelled && draft && Array.isArray(draft.shapes) && draft.partsCount === parts.length) {
           useEditorStore.setState({
-            shapes: draft.shapes as Shape[],
+            shapes: draft.shapes.filter(isValidShape),
             past: [],
             future: [],
             selectedId: null,
@@ -391,6 +455,20 @@ export default function EditorApp(): React.JSX.Element {
     };
   }, [state, captureId, parts.length]);
 
+  // Flight-recorder state transitions (load outcomes, zoom) — one line per
+  // change so a console read tells the whole session story.
+  const loggedState = React.useRef("");
+  React.useEffect(() => {
+    const key = `${state}|${captureId ?? ""}|${parts.length}|${usedFallback}`;
+    if (key === loggedState.current) return;
+    loggedState.current = key;
+  }, [state, captureId, parts.length, usedFallback]);
+
+  React.useEffect(() => {
+      // ignore
+  }
+, [zoom]);
+
   // Global hotkeys: undo/redo, tool shortcuts, zoom. Skipped while typing.
   React.useEffect(() => {
     if (state !== "ready") return;
@@ -404,13 +482,16 @@ export default function EditorApp(): React.JSX.Element {
       h: "highlight",
       n: "badge",
       b: "blur",
+      d: "redact",
       c: "crop",
     };
     const onKey = (e: KeyboardEvent) => {
       const t = e.target as HTMLElement | null;
       if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-      const mod = e.ctrlKey || e.metaKey;
       const st = useEditorStore.getState();
+      // Text composer open (even unfocused): letters belong to the text.
+      if (st.composing) return;
+      const mod = e.ctrlKey || e.metaKey;
       if (mod && e.key.toLowerCase() === "z") {
         e.preventDefault();
         if (e.shiftKey) st.redo();
@@ -428,13 +509,11 @@ export default function EditorApp(): React.JSX.Element {
         st.setTool(tool);
         return;
       }
-      if (e.key === "+" || e.key === "=") cycleZoom(1);
-      else if (e.key === "-" || e.key === "_") cycleZoom(-1);
-      else if (e.key === "0") setZoom("fit");
+      // Zoom is Fit / 100% buttons only — no keyboard stepping.
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [state, cycleZoom]);
+  }, [state]);
 
   const metaLine = capture
     ? `${
@@ -449,7 +528,7 @@ export default function EditorApp(): React.JSX.Element {
     : null;
 
   return (
-    <div className="min-h-screen bg-[#FFF6E9] font-['Public_Sans',ui-sans-serif,system-ui,sans-serif] text-black antialiased">
+    <div className="nb-scope min-h-screen bg-[#FFF6E9] font-['Public_Sans',ui-sans-serif,system-ui,sans-serif] text-black antialiased">
       <header className="sticky top-0 z-10 border-b-[3px] border-black bg-[#FFFDF7]">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
           <div className="flex items-center gap-3">
@@ -474,6 +553,12 @@ export default function EditorApp(): React.JSX.Element {
                     NO CAPTURE
                   </span>
                 )}
+                <span
+                  className="border-2 border-black bg-white px-2 py-0.5 font-mono text-[10px] font-bold"
+                  title="Build identity — if this doesn't match the latest announced build, reload this tab (extension pages keep old JS until reloaded)"
+                >
+                  {buildTag()}
+                </span>
               </div>
               <div className="font-mono text-[11px] text-black/60">
                 {metaLine ?? "Dedicated capture tab"}
@@ -481,9 +566,9 @@ export default function EditorApp(): React.JSX.Element {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {capture?.sourceUrl && (
+            {capture?.sourceUrl && safeHref(capture.sourceUrl) && (
               <a
-                href={capture.sourceUrl}
+                href={safeHref(capture.sourceUrl)}
                 target="_blank"
                 rel="noreferrer"
                 className="hidden items-center gap-1.5 border-2 border-black bg-white px-2.5 py-1.5 text-xs font-bold shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] sm:inline-flex"
@@ -528,7 +613,7 @@ export default function EditorApp(): React.JSX.Element {
             <h1 className="mt-4 font-['Bricolage_Grotesque','Public_Sans',sans-serif] text-lg font-extrabold">Failed to load screenshot</h1>
             <p className="mx-auto mt-2 max-w-md text-sm font-medium leading-6">{error ?? "Unknown error"}</p>
             <p className="mt-1 font-mono text-xs">
-              Try capturing again from the popup or with Alt+Shift+V.
+              Try capturing again from the popup or with Alt+Shift+S.
             </p>
           </div>
         )}
@@ -548,7 +633,7 @@ export default function EditorApp(): React.JSX.Element {
               <span className="inline-flex items-center gap-1 border-2 border-black bg-white px-1.5 py-0.5 font-mono text-xs font-bold">
                 <ScrollText className="h-3 w-3" strokeWidth={2.5} /> Full Page
               </span>{" "}
-              or press <code className="border-2 border-black bg-white px-1.5 py-0.5 font-mono text-xs font-bold">Alt+Shift+V</code> /{" "}
+              or press <code className="border-2 border-black bg-white px-1.5 py-0.5 font-mono text-xs font-bold">Alt+Shift+S</code> /{" "}
               <code className="border-2 border-black bg-white px-1.5 py-0.5 font-mono text-xs font-bold">Alt+Shift+F</code>. The image
               will appear here.
             </p>
@@ -574,7 +659,7 @@ export default function EditorApp(): React.JSX.Element {
                   {capture.type === "full-page" ? "Full Page" : capture.type === "selected-area" ? "Selected Area" : "Visible"}
                 </span>
                 <span className="font-mono text-black/60">
-                  {capture.sourceUrl ? new URL(capture.sourceUrl).hostname : "unknown host"}
+                  {safeHost(capture.sourceUrl)}
                 </span>
                 <span className="hidden text-black/60 sm:inline">
                   • {new Date(capture.createdAt).toLocaleTimeString()}
@@ -595,20 +680,13 @@ export default function EditorApp(): React.JSX.Element {
             />
 
             <div className="flex items-center justify-center gap-1.5">
-              <button
-                type="button"
-                title="Zoom out (-)"
-                onClick={() => cycleZoom(-1)}
-                className="cursor-pointer border-2 border-black bg-white p-1.5 shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
-              >
-                <ZoomOut className="h-3.5 w-3.5" strokeWidth={2.5} />
-              </button>
               {ZOOM_STEPS.map((z) => (
                 <button
                   key={z.label}
                   type="button"
                   onClick={() => setZoom(z.value)}
-                  title={z.value === "fit" ? "Fit width (no upscaling)" : `Show at ${z.label} of natural size`}
+                  title={z.value === "fit" ? "Fit to canvas" : "Show at natural size (100%)"}
+                  aria-pressed={zoom === z.value}
                   className={`inline-flex cursor-pointer items-center gap-1 border-2 border-black px-2.5 py-1.5 font-mono text-[11px] font-bold transition-all duration-100 ${
                     zoom === z.value
                       ? "bg-black text-white shadow-[2px_2px_0_rgba(0,0,0,0.35)]"
@@ -619,14 +697,6 @@ export default function EditorApp(): React.JSX.Element {
                   {z.label}
                 </button>
               ))}
-              <button
-                type="button"
-                title="Zoom in (+)"
-                onClick={() => cycleZoom(1)}
-                className="cursor-pointer border-2 border-black bg-white p-1.5 shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
-              >
-                <ZoomIn className="h-3.5 w-3.5" strokeWidth={2.5} />
-              </button>
             </div>
 
             <CanvasViewport images={imageUrls} zoom={zoom} />
@@ -635,7 +705,7 @@ export default function EditorApp(): React.JSX.Element {
               {multiPart
                 ? "All parts stacked as one canvas — annotate across them, export flattens to a single file."
                 : "Annotate with shapes, arrows, text, blur, or crop — then Export or Copy."}{" "}
-              Shortcuts: V R O A T P H N B C · Del · Ctrl+Z · +/−/0
+              Shortcuts: V R O A T P H N B D C · Del · Ctrl+Z · click selects, drag moves, empty/right-click clears
             </p>
           </div>
         )}

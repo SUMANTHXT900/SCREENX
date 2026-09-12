@@ -64,6 +64,17 @@ body {
   outline-offset: 2px;
 }
 
+/* Neobrutalist pages draw their own focus affordances (border/shadow lift
+   on the wrapping label). Where no wrapping label provides one (range
+   inputs, bare textareas), fall back to a thick black outline instead of
+   going invisible (WCAG 2.4.7) — a "black box" that MEANS focused. Unlayered
+   on purpose: Tailwind's layered outline-none loses to the unlayered rule. */
+.nb-scope input:focus-visible,
+.nb-scope textarea:focus-visible {
+  outline: 3px solid #000;
+  outline-offset: 1px;
+}
+
 /* Scrollbar minimal */
 * {
   scrollbar-width: thin;

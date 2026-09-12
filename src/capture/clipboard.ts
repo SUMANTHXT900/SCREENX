@@ -32,8 +32,7 @@ export async function copyBlobToClipboard(blob: Blob, writer: ClipboardWriter = 
     if (!blob || blob.size === 0) return false;
     await writer(blob);
     return true;
-  } catch (e) {
-    console.debug("[ScreenX] direct clipboard write failed:", e instanceof Error ? e.message : String(e));
+  } catch {
     return false;
   }
 }
@@ -75,10 +74,6 @@ async function rawCopySend(tabId: number, dataUrl: string, timeoutMs: number): P
     }
   })) as { ok?: boolean; error?: string; focused?: boolean; transientActivation?: boolean } | null;
   if (response?.ok !== true) {
-    console.debug("[ScreenX] content clipboard copy failed:", response?.error ?? "no-response", {
-      focused: response?.focused,
-      transientActivation: response?.transientActivation,
-    });
     return {
       ok: false,
       focused: response?.focused,
@@ -111,15 +106,10 @@ export async function encodeForClipboard(
     if (!blob || blob.size === 0) return null;
     const dataUrl = await encode(blob);
     if (typeof dataUrl !== "string" || dataUrl.length > COPY_IMAGE_MAX_CHARS) {
-      console.debug("[ScreenX] clipboard skipped: image too large for message transport", {
-        chars: typeof dataUrl === "string" ? dataUrl.length : -1,
-        cap: COPY_IMAGE_MAX_CHARS,
-      });
       return null;
     }
     return dataUrl;
-  } catch (e) {
-    console.debug("[ScreenX] clipboard encode failed:", e instanceof Error ? e.message : String(e));
+  } catch {
     return null;
   }
 }
@@ -135,15 +125,9 @@ export async function sendCopyImage(
   sender: CopySender = defaultSender
 ): Promise<boolean> {
   try {
-    console.debug("[ScreenX] clipboard: sending COPY_IMAGE to tab", {
-      tabId,
-      chars: dataUrl.length,
-    });
     const ok = await sender(tabId, dataUrl, timeoutMs);
-    console.debug(`[ScreenX] clipboard: content write ok=${ok}`);
     return ok;
-  } catch (e) {
-    console.debug("[ScreenX] clipboard copy failed:", e instanceof Error ? e.message : String(e));
+  } catch {
     return false;
   }
 }
@@ -162,7 +146,6 @@ export async function sendCopyImageReport(
     return await rawCopySend(tabId, dataUrl, timeoutMs);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    console.debug("[ScreenX] clipboard copy failed:", msg);
     return { ok: false, error: msg };
   }
 }
@@ -178,7 +161,7 @@ export async function sendCopyImageReport(
  * carries the same dataUrl and writes synchronously in the click handler.
  */
 export async function copyCaptureToClipboard(
-  captureId: string,
+  _captureId: string,
   blob: Blob | undefined,
   tabId: number | undefined,
   deps: CopyDeps = {},
@@ -186,16 +169,13 @@ export async function copyCaptureToClipboard(
 ): Promise<boolean> {
   try {
     if (tabId === undefined) {
-      console.debug("[ScreenX] clipboard skipped: missing tab", { captureId });
       return false;
     }
-    console.debug("[ScreenX] clipboard: encoding blob", { bytes: blob?.size, tabId });
     const dataUrl = await encodeForClipboard(blob, deps.encode);
     if (!dataUrl) return false;
     const sender = deps.sender ?? defaultSender;
     return await sendCopyImage(tabId, dataUrl, timeoutMs, sender);
-  } catch (e) {
-    console.debug("[ScreenX] clipboard copy failed:", e instanceof Error ? e.message : String(e));
+  } catch {
     return false;
   }
 }

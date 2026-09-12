@@ -34,19 +34,31 @@ describe("resizeBox", () => {
 });
 
 describe("offsetShapes new kinds", () => {
-  test("badge and highlight translate", () => {
+  test("badge, highlight, and redact translate", () => {
     const out = offsetShapes(
       [
         { kind: "badge", id: "b", color: "#000", strokeWidth: 1, x: 5, y: 5, n: 1, fontSize: 20 },
         { kind: "highlight", id: "h", color: "#000", strokeWidth: 1, points: [{ x: 1, y: 1 }], width: 14 },
+        { kind: "redact", id: "r", color: "#000", strokeWidth: 1, x: 2, y: 4, w: 10, h: 10 },
       ],
       10,
       -3
     );
     expect(out[0]).toMatchObject({ x: 15, y: 2 });
     expect(out[1]).toMatchObject({ points: [{ x: 11, y: -2 }] });
+    expect(out[2]).toMatchObject({ x: 12, y: 1, w: 10, h: 10 });
   });
 });
+describe("composing flag", () => {
+  test("toggles for the hotkey guard", () => {
+    const st = useEditorStore.getState();
+    st.setComposing(true);
+    expect(useEditorStore.getState().composing).toBe(true);
+    st.setComposing(false);
+    expect(useEditorStore.getState().composing).toBe(false);
+  });
+});
+
 describe("restyleSelected", () => {
   beforeEach(() => {
     useEditorStore.getState().reset();

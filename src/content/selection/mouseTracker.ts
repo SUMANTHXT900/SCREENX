@@ -159,6 +159,11 @@ export function trackExtendDrag(
   const step = () => {
     frame = null;
     if (done) return;
+    // Auto-scroll only runs inside the edge zones — anywhere else the frame
+    // would do zero work, so park the loop and let the next pointermove
+    // (moveTo) restart it. finish() still cancels unconditionally.
+    const inZone = upward ? pointerY < EDGE_ZONE : window.innerHeight - pointerY < EDGE_ZONE;
+    if (!inZone) return;
     if (upward) {
       if (pointerY < EDGE_ZONE) {
         const ramp = clamp((EDGE_ZONE - pointerY) / EDGE_ZONE, 0, 1);
@@ -205,6 +210,8 @@ export function trackExtendDrag(
       box = { ...box, height: bottom - box.top };
     }
     cb.onBox(box);
+    // Restart the parked auto-scroll loop (step parks itself outside zones).
+    if (frame === null && !done) frame = requestAnimationFrame(step);
   };
 
   const finish = () => {

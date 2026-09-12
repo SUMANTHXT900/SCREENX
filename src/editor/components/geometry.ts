@@ -45,6 +45,8 @@ export function resizeBox(g: BoxGeom, handle: ResizeHandle, p: Point, min = 8): 
       const ny = Math.min(p.y, y2 - min);
       return { x: nx, y: ny, w: x2 - nx, h: y2 - ny };
     }
+    default:
+      return g;
   }
 }
 

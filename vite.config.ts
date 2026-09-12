@@ -27,7 +27,10 @@ export default defineConfig({
         // so chunks are fine there — this guard covers content.js only.
         for (const [fileName, chunk] of Object.entries(bundle)) {
           if (fileName !== "content.js" || chunk.type !== "chunk") continue;
-          if (/(^|[;\n}])\s*import\s*[{*]/.test(chunk.code)) {
+          // All static import forms: side-effect (`import"./x"`), named,
+          // namespace, and default. `import.meta` intentionally excluded
+          // (valid metadata access, Vite-resolvable — not a module split).
+          if (/(^|[;\n}])\s*import(?=\s*["'{*]|\s+[A-Za-z_$])/.test(chunk.code)) {
             throw new Error(
               "[enforce-classic-content] dist/content.js contains a static import statement. " +
                 "A module shared with another entry is being code-split into it. " +

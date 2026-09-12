@@ -1,37 +1,17 @@
 import * as React from "react";
-import { Library, Search, Loader2, ImageOff } from "lucide-react";
+import { Library, Search, Loader2, ImageOff, Clock } from "lucide-react";
 import {
   deleteCapture,
   deleteGroup,
+  getCapturesByGroup,
   listCaptures,
   type CaptureRecord,
 } from "@/storage/idb/capturesRepo";
+import { buildDownloadFilename } from "@/storage/downloadName";
+import { deleteHistoryEntry } from "@/storage/history/activityLog";
 import { getEditorUrl, getGroupEditorUrl } from "@/capture";
+import { toGroups, type Group } from "./groups";
 import CaptureCard from "./components/CaptureCard";
-
-interface Group {
-  key: string;
-  first: CaptureRecord;
-  count: number;
-  ids: string[];
-}
-
-function toGroups(records: CaptureRecord[]): Group[] {
-  const map = new Map<string, Group>();
-  for (const r of records) {
-    const key = r.groupId ?? r.id;
-    const g = map.get(key);
-    if (g) {
-      g.ids.push(r.id);
-      // Keep earliest-created part first for stable cover + ordering.
-      if (r.createdAt < g.first.createdAt) g.first = r;
-      g.count += 1;
-    } else {
-      map.set(key, { key, first: r, count: 1, ids: [r.id] });
-    }
-  }
-  return [...map.values()].sort((a, b) => b.first.createdAt - a.first.createdAt);
-}
 
 const PAGE_SIZE = 24;
 
@@ -119,23 +99,27 @@ export default function WorkspaceApp(): React.JSX.Element {
   const downloadGroup = React.useCallback(
     (g: Group) => {
       // Reuse the cover URL for singles; groups download every part file.
-      const downloadOne = (id: string, suffix: string) => {
-        const url = urls[id];
+      const downloadOne = (record: CaptureRecord) => {
+        const url = urls[record.id];
         if (!url) return;
         const a = document.createElement("a");
         a.href = url;
-        a.download = `screenx-${id.slice(0, 8)}${suffix}.png`;
+        a.download = buildDownloadFilename({
+          sourceUrl: record.sourceUrl,
+          type: record.type,
+          createdAt: record.createdAt,
+          ext: "png",
+        });
         document.body.appendChild(a);
         a.click();
         a.remove();
       };
       if (g.count === 1) {
-        downloadOne(g.first.id, "");
+        downloadOne(g.first);
         return;
       }
       // Parts beyond the cover need blob URLs — fetch records on demand.
       void (async () => {
-        const { getCapturesByGroup } = await import("@/storage/idb/capturesRepo");
         try {
           const parts = await getCapturesByGroup(g.key);
           const tmp: string[] = [];
@@ -145,7 +129,14 @@ export default function WorkspaceApp(): React.JSX.Element {
               tmp.push(u);
               const a = document.createElement("a");
               a.href = u;
-              a.download = `screenx-${p.id.slice(0, 8)}-part${i + 1}of${parts.length}.png`;
+              a.download = buildDownloadFilename({
+                sourceUrl: p.sourceUrl,
+                type: p.type,
+                createdAt: p.createdAt,
+                partIndex: i + 1,
+                partTotal: parts.length,
+                ext: "png",
+              });
               document.body.appendChild(a);
               a.click();
               a.remove();
@@ -164,7 +155,7 @@ export default function WorkspaceApp(): React.JSX.Element {
           }, 30_000);
         } catch {
           // fall back to cover only
-          downloadOne(g.first.id, "");
+          downloadOne(g.first);
         }
       })();
     },
@@ -179,6 +170,14 @@ export default function WorkspaceApp(): React.JSX.Element {
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
         return;
+      }
+      // Image gone ⇒ its history line goes too (history never throws).
+      for (const id of g.ids) {
+        try {
+          await deleteHistoryEntry(id);
+        } catch {
+          // ignore — best-effort
+        }
       }
       setRecords((prev) => prev.filter((r) => !g.ids.includes(r.id)));
       setUrls((prev) => {
@@ -203,7 +202,7 @@ export default function WorkspaceApp(): React.JSX.Element {
   const totalImages = records.length;
 
   return (
-    <div className="min-h-screen bg-[#FFF6E9] font-['Public_Sans',ui-sans-serif,system-ui,sans-serif] text-black antialiased">
+    <div className="nb-scope min-h-screen bg-[#FFF6E9] font-['Public_Sans',ui-sans-serif,system-ui,sans-serif] text-black antialiased">
       <header className="sticky top-0 z-10 border-b-[3px] border-black bg-[#FFFDF7]">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-6 py-4">
           <div className="flex items-center gap-3">
@@ -219,6 +218,15 @@ export default function WorkspaceApp(): React.JSX.Element {
               </div>
             </div>
           </div>
+          <div className="flex items-center gap-2">
+          <a
+            href={typeof chrome !== "undefined" && chrome.runtime?.getURL ? chrome.runtime.getURL("history.html") : "/history.html"}
+            title="Open capture history"
+            className="flex items-center gap-1.5 border-2 border-black bg-white px-3 py-1.5 text-xs font-bold text-black shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+          >
+            <Clock className="h-3.5 w-3.5" strokeWidth={2.5} />
+            <span className="hidden sm:inline">History</span>
+          </a>
           <label className="flex cursor-text items-center gap-2 border-2 border-black bg-white px-3 py-1.5 text-xs text-black/60 shadow-[2px_2px_0_#000] transition-all duration-100 focus-within:translate-x-[-1px] focus-within:translate-y-[-1px] focus-within:shadow-[3px_3px_0_#000] focus-within:text-black sm:min-w-56">
             <Search className="h-3.5 w-3.5 shrink-0" strokeWidth={2.5} />
             <input
@@ -231,6 +239,7 @@ export default function WorkspaceApp(): React.JSX.Element {
               className="w-full bg-transparent font-medium text-black outline-none placeholder:text-black/40"
             />
           </label>
+          </div>
         </div>
       </header>
       <main className="mx-auto max-w-6xl px-6 py-8">
@@ -278,7 +287,30 @@ export default function WorkspaceApp(): React.JSX.Element {
                     onDownload={() => downloadGroup(g)}
                     onDelete={() => void removeGroup(g)}
                   />
-                ) : null
+                ) : (
+                  <div
+                    key={g.key}
+                    className="flex flex-col items-center justify-center gap-2 border-[3px] border-black bg-[#F87171] px-4 py-10 text-center shadow-[4px_4px_0_#000]"
+                  >
+                    <p className="text-xs font-bold">Preview failed to load</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const rec = records.find((r) => r.id === g.first.id);
+                        if (!rec) return;
+                        try {
+                          const url = URL.createObjectURL(rec.blob);
+                          setUrls((prev) => ({ ...prev, [rec.id]: url }));
+                        } catch {
+                          setError("Couldn't preview this image.");
+                        }
+                      }}
+                      className="cursor-pointer border-2 border-black bg-white px-3 py-1.5 text-xs font-bold shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+                    >
+                      Retry preview
+                    </button>
+                  </div>
+                )
               )}
             </div>
             {visibleCount < filtered.length && (

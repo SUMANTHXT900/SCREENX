@@ -395,10 +395,6 @@ export class CanvasStitcher implements Stitcher {
             finalHeight
           );
           if (aligned !== dstY) {
-            console.debug(
-              "[ScreenX] strip nudged to line up with previous strip",
-              JSON.stringify({ chunk: i, deltaPx: aligned - dstY })
-            );
             drift += aligned - dstY;
             dstY = aligned;
           }

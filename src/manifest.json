@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ScreenX",
-  "version": "0.1.1",
+  "version": "0.1.21",
   "description": "Premium screenshot capture — visible, full-page, and area — with editor, workspace, and history.",
   "icons": {
     "16": "icons/icon16.png",
@@ -20,8 +20,8 @@
   "commands": {
     "capture-visible": {
       "suggested_key": {
-        "default": "Alt+Shift+V",
-        "mac": "Alt+Shift+V"
+        "default": "Alt+Shift+S",
+        "mac": "Alt+Shift+S"
       },
       "description": "Capture visible area"
     },
@@ -34,8 +34,8 @@
     },
     "capture-selected-area": {
       "suggested_key": {
-        "default": "Alt+Shift+S",
-        "mac": "Alt+Shift+S"
+        "default": "Alt+Shift+C",
+        "mac": "Alt+Shift+C"
       },
       "description": "Capture selected area"
     }

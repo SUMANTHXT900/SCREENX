@@ -19,6 +19,7 @@ export function offsetShapes(shapes: Shape[], dx: number, dy: number): Shape[] {
       case "rect":
       case "ellipse":
       case "blur":
+      case "redact":
         return { ...s, x: s.x + dx, y: s.y + dy };
       case "arrow":
         return { ...s, x1: s.x1 + dx, y1: s.y1 + dy, x2: s.x2 + dx, y2: s.y2 + dy };
@@ -29,6 +30,10 @@ export function offsetShapes(shapes: Shape[], dx: number, dy: number): Shape[] {
       case "pencil":
       case "highlight":
         return { ...s, points: s.points.map((p) => ({ x: p.x + dx, y: p.y + dy })) };
+      default:
+        // Forward-compat: a corrupt/unknown persisted kind passes through
+        // instead of returning undefined and poisoning the array.
+        return s;
     }
   });
 }
@@ -137,6 +142,14 @@ function paintShapes(
       ctx.restore();
       continue;
     }
+    if (s.kind === "redact") {
+      // Opaque blackout — no blur, no alpha, nothing recoverable.
+      ctx.save();
+      ctx.fillStyle = "#000000";
+      ctx.fillRect(s.x + ox, s.y + oy, s.w, s.h);
+      ctx.restore();
+      continue;
+    }
     ctx.save();
     ctx.strokeStyle = s.color;
     ctx.fillStyle = s.color;
@@ -144,10 +157,18 @@ function paintShapes(
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
     if (s.kind === "rect") {
+      if (s.fill) {
+        ctx.fillStyle = s.fill;
+        ctx.fillRect(s.x + ox, s.y + oy, s.w, s.h);
+      }
       ctx.strokeRect(s.x + ox, s.y + oy, s.w, s.h);
     } else if (s.kind === "ellipse") {
       ctx.beginPath();
       ctx.ellipse(s.x + ox + s.w / 2, s.y + oy + s.h / 2, Math.abs(s.w / 2), Math.abs(s.h / 2), 0, 0, Math.PI * 2);
+      if (s.fill) {
+        ctx.fillStyle = s.fill;
+        ctx.fill();
+      }
       ctx.stroke();
     } else if (s.kind === "arrow") {
       ctx.beginPath();

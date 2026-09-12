@@ -87,6 +87,7 @@ export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDo
             onClick={onDownload}
             className="inline-flex cursor-pointer items-center justify-center border-2 border-black bg-white p-1.5 text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:bg-[#60A5FA] hover:shadow-[4px_4px_0_#000] active:translate-x-[3px] active:translate-y-[3px] active:shadow-none"
             title={partCount != null ? `Download all ${partCount} parts` : "Download PNG"}
+            aria-label={partCount != null ? `Download all ${partCount} parts` : "Download screenshot"}
           >
             <Download className="h-3.5 w-3.5" strokeWidth={2.5} />
           </button>
@@ -95,6 +96,7 @@ export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDo
             onClick={onDelete}
             className="inline-flex cursor-pointer items-center justify-center border-2 border-black bg-[#F87171] p-1.5 text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[4px_4px_0_#000] active:translate-x-[3px] active:translate-y-[3px] active:shadow-none"
             title={partCount != null ? `Delete all ${partCount} parts` : "Delete"}
+            aria-label={partCount != null ? `Delete all ${partCount} parts` : "Delete screenshot"}
           >
             <Trash2 className="h-3.5 w-3.5" strokeWidth={2.5} />
           </button>

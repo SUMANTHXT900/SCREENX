@@ -1,7 +1,21 @@
 import * as React from "react";
-import { Monitor, Scan, ScrollText, Clock, Library, Crop, Loader2, AlertCircle, X } from "lucide-react";
+import { Monitor, Scan, ScrollText, Clock, Library, Loader2, AlertCircle, X, Github } from "lucide-react";
 import { CaptureError, type CaptureType } from "@/types";
-import { CONTENT_PROTOCOL_VERSION } from "@/messaging/events";
+import { buildTag } from "@/version";
+
+const GITHUB_URL = "https://github.com/SUMANTHXT900/SCREENX";
+const LOGO_URL =
+  typeof chrome !== "undefined" && chrome.runtime?.getURL
+    ? chrome.runtime.getURL("icons/logo.svg")
+    : "icons/logo.svg";
+
+function openExternal(url: string): void {
+  if (chrome.tabs?.create) {
+    void chrome.tabs.create({ url });
+  } else {
+    window.open(url, "_blank", "noopener");
+  }
+}
 
 function openExtensionPage(page: string): void {
   const url = chrome.runtime?.getURL ? chrome.runtime.getURL(page) : `/${page}`;
@@ -15,15 +29,17 @@ function openExtensionPage(page: string): void {
 const CAPTURE_OPTIONS = [
   {
     id: "visible" as const,
+    command: "capture-visible",
     label: "Visible",
     desc: "Current viewport",
     icon: Monitor,
-    shortcut: "Alt ⇧ V",
+    shortcut: "Alt ⇧ S",
     enabled: true,
     tile: "bg-[#4ADE80]",
   },
   {
     id: "full-page" as const,
+    command: "capture-fullpage",
     label: "Full Page",
     desc: "Entire scrollable page",
     icon: ScrollText,
@@ -33,14 +49,24 @@ const CAPTURE_OPTIONS = [
   },
   {
     id: "selected-area" as const,
+    command: "capture-selected-area",
     label: "Selected Area",
     desc: "Drag a box, extend it",
     icon: Scan,
-    shortcut: "Alt ⇧ S",
+    shortcut: "Alt ⇧ C",
     enabled: true,
     tile: "bg-[#60A5FA]",
   },
 ] as const;
+
+/** Prettify chrome.commands shortcut text ("Alt+Shift+V" → "Alt ⇧ V"). */
+function prettyShortcut(raw: string): string {
+  return raw
+    .replace(/Command\+/g, "⌘ ")
+    .replace(/Ctrl\+/g, "Ctrl ")
+    .replace(/Alt\+/g, "Alt ")
+    .replace(/Shift\+/g, "⇧ ");
+}
 
 function friendlyError(err: CaptureError): string {
   switch (err.code) {
@@ -80,6 +106,57 @@ export default function App(): React.JSX.Element {
   const [isCapturing, setIsCapturing] = React.useState(false);
   const [capturingType, setCapturingType] = React.useState<CaptureType | null>(null);
   const [error, setError] = React.useState<string | null>(null);
+  // Live counts (null = still loading). Workspace via IDB count() — no blob
+  // reads; history via the metadata log. Failures stay null ("…").
+  const [savedCount, setSavedCount] = React.useState<number | null>(null);
+  const [historyCount, setHistoryCount] = React.useState<number | null>(null);
+  // Live key bindings (null = still loading). A command Chrome left unassigned
+  // (conflict at install time) shows "Not set" instead of a lying default.
+  const [bindings, setBindings] = React.useState<Record<string, string | null> | null>(null);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [{ countCaptures }, { listHistory }] = await Promise.all([
+          import("@/storage/idb/capturesRepo"),
+          import("@/storage/history/activityLog"),
+        ]);
+        const [n, list] = await Promise.all([
+          countCaptures().catch(() => null),
+          listHistory().catch(() => null),
+        ]);
+        if (cancelled) return;
+        if (typeof n === "number") setSavedCount(n);
+        if (list) setHistoryCount(list.length);
+      } catch {
+        // ignore — badges stay in loading state
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cmds = await chrome.commands.getAll();
+        if (cancelled) return;
+        const map: Record<string, string | null> = {};
+        for (const c of cmds) {
+          if (c.name) map[c.name] = c.shortcut && c.shortcut.length > 0 ? prettyShortcut(c.shortcut) : null;
+        }
+        setBindings(map);
+      } catch {
+        // ignore — badges keep the documented defaults
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleCapture = React.useCallback(
     async (type: CaptureType) => {
@@ -118,15 +195,17 @@ export default function App(): React.JSX.Element {
       <div className="px-4 pb-3 pt-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2.5">
-            <div className="flex h-10 w-10 items-center justify-center border-2 border-black bg-black text-white shadow-[3px_3px_0_#000]">
-              <Crop className="h-5 w-5" strokeWidth={2.25} />
-            </div>
+            <img
+              src={LOGO_URL}
+              alt="ScreenX logo"
+              className="h-10 w-10 border-2 border-black shadow-[3px_3px_0_#000]"
+            />
             <div className="leading-none">
               <div className="nb-font-display text-[19px] font-extrabold tracking-tight">
                 ScreenX
               </div>
               <div className="mt-1 font-mono text-[10px] font-medium text-black/60">
-                v0.1.1-redcross · proto {CONTENT_PROTOCOL_VERSION}
+                {buildTag()}
               </div>
             </div>
           </div>
@@ -151,6 +230,11 @@ export default function App(): React.JSX.Element {
                   ? "Stitching full page…"
                   : "Capturing viewport…"
               : opt.desc;
+            // Live binding when known; "Not set" when Chrome left the command
+            // unassigned (claimed by another extension at install time).
+            const live = bindings ? bindings[opt.command] : undefined;
+            const badge = live ?? opt.shortcut;
+            const unbound = bindings !== null && live == null;
 
             return (
               <button
@@ -160,10 +244,10 @@ export default function App(): React.JSX.Element {
                 aria-busy={isThisCapturing}
                 title={
                   opt.id === "visible"
-                    ? "Capture the visible viewport (Alt+Shift+V)"
+                    ? "Capture the visible viewport (Alt+Shift+S)"
                     : opt.id === "full-page"
                       ? "Capture the entire page (Alt+Shift+F)"
-                      : "Capture a cross-scroll range (Alt+Shift+S)"
+                      : "Capture a cross-scroll range (Alt+Shift+C)"
                 }
                 className="nb-card nb-press flex w-full cursor-pointer items-center gap-3 px-3 py-2.5 text-left disabled:cursor-not-allowed disabled:opacity-70"
               >
@@ -182,8 +266,11 @@ export default function App(): React.JSX.Element {
                     {sub}
                   </div>
                 </div>
-                <span className="hidden shrink-0 border-2 border-black bg-white px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none shadow-[2px_2px_0_#000] sm:inline">
-                  {opt.shortcut}
+                <span
+                  title={unbound ? "No shortcut assigned — set one at chrome://extensions/shortcuts" : undefined}
+                  className={`shrink-0 border-2 border-black px-1.5 py-0.5 font-mono text-[10px] font-bold leading-none shadow-[2px_2px_0_#000] ${unbound ? "bg-[#F87171]" : "bg-white"}`}
+                >
+                  {unbound ? "Not set" : badge}
                 </span>
               </button>
             );
@@ -214,11 +301,6 @@ export default function App(): React.JSX.Element {
           </div>
         )}
 
-        <div className="mt-3 border-2 border-dashed border-black/40 px-3 py-2">
-          <p className="text-[12px] font-medium leading-snug text-black/70">
-            Selected area: drag a box, pull the handle down, release (Esc cancels).
-          </p>
-        </div>
       </div>
 
       <div aria-hidden="true" className="h-0.5 bg-black" />
@@ -241,7 +323,7 @@ export default function App(): React.JSX.Element {
             </span>
             <span className="text-[14px] font-bold leading-none">Workspace</span>
             <span className="font-mono text-[10.5px] font-medium leading-none text-black/60">
-              Saved items • 0
+              Saved items • {savedCount ?? "…"}
             </span>
           </button>
 
@@ -256,7 +338,7 @@ export default function App(): React.JSX.Element {
             </span>
             <span className="text-[14px] font-bold leading-none">History</span>
             <span className="font-mono text-[10.5px] font-medium leading-none text-black/60">
-              Activity • 0
+              Activity • {historyCount ?? "…"}
             </span>
           </button>
         </div>
@@ -265,7 +347,25 @@ export default function App(): React.JSX.Element {
       {/* Footer */}
       <div className="flex items-center justify-between border-t-2 border-black bg-[#FFE9C7] px-4 py-2">
         <span className="font-mono text-[10px] font-bold tracking-wide">SCREENX © 2026</span>
-        <span className="font-mono text-[10px] text-black/60">MANIFEST V3</span>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => openExternal("https://github.com/SUMANTHXT900/SCREENX/blob/main/PRIVACY.md")}
+            title="How ScreenX handles your data (100% local)"
+            className="cursor-pointer border-2 border-black bg-white px-2 py-0.5 font-mono text-[10px] font-bold shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+          >
+            Privacy
+          </button>
+          <button
+            type="button"
+            onClick={() => openExternal(GITHUB_URL)}
+            title="Open ScreenX on GitHub"
+            className="flex cursor-pointer items-center gap-1.5 border-2 border-black bg-white px-2 py-0.5 font-mono text-[10px] font-bold shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
+          >
+          <Github className="h-3 w-3" strokeWidth={2.5} />
+          GitHub
+        </button>
+        </div>
       </div>
     </div>
   );

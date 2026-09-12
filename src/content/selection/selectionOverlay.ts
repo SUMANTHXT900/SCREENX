@@ -23,6 +23,8 @@ let refs: OverlayRefs | null = null;
 let styleEl: HTMLStyleElement | null = null;
 let reviewBar: HTMLDivElement | null = null;
 let cornerXBtn: HTMLButtonElement | null = null;
+/** Tab-trap registration (root outlives overlays — must be removed explicitly). */
+let trapReg: { root: ShadowRoot; fn: (e: Event) => void } | null = null;
 
 const ACCENT = "#4ADE80";
 
@@ -288,6 +290,11 @@ export function mountOverlay(onCancel: () => void): OverlayRefs {
 
   const dim = document.createElement("div");
   dim.style.cssText = DIM_CSS;
+  // Dialog semantics: focus moves here on mount, Tab stays inside, stage
+  // hints announce via the live region (see hint below).
+  dim.setAttribute("role", "dialog");
+  dim.setAttribute("aria-modal", "true");
+  dim.setAttribute("aria-label", "Select screenshot area");
 
   const box = document.createElement("div");
   box.style.cssText = BOX_CSS;
@@ -335,6 +342,7 @@ export function mountOverlay(onCancel: () => void): OverlayRefs {
 
   const hint = document.createElement("div");
   hint.style.cssText = HINT_CSS;
+  hint.setAttribute("aria-live", "polite");
 
   const label = document.createElement("div");
   label.style.cssText = LABEL_CSS;
@@ -360,6 +368,46 @@ export function mountOverlay(onCancel: () => void): OverlayRefs {
   cornerXBtn.addEventListener("click", () => onCancel());
   root.appendChild(cornerXBtn);
 
+  // Move keyboard/screen-reader context into the overlay; Tab cycles among
+  // overlay buttons only (page behind the dim is unreachable by keyboard).
+  // Review-bar buttons mount later — the trap queries live on each Tab.
+  // Registered on the shadow root (covers dim + corner button + review bar),
+  // removed in destroyOverlay (root outlives overlays — shared with toasts).
+  trapReg = {
+    root,
+    fn: (e: Event) => {
+      const ke = e as KeyboardEvent;
+      if (ke.key !== "Tab") return;
+      try {
+        const scope = ensureUiRoot();
+        const items = Array.from(scope.querySelectorAll("button")).filter(
+          (b) => b instanceof HTMLElement && !b.hasAttribute("disabled") && scope.contains(b)
+        ) as HTMLElement[];
+        if (items.length === 0) return;
+        const first = items[0]!;
+        const last = items[items.length - 1]!;
+        const active = scope.activeElement ?? document.activeElement;
+        if (ke.shiftKey && (active === first || !scope.contains(active))) {
+          ke.preventDefault();
+          ke.stopPropagation();
+          last.focus();
+        } else if (!ke.shiftKey && active === last) {
+          ke.preventDefault();
+          ke.stopPropagation();
+          first.focus();
+        }
+      } catch {
+        // ignore — trap is best-effort
+      }
+    },
+  };
+  root.addEventListener("keydown", trapReg.fn, true);
+  try {
+    cornerXBtn.focus();
+  } catch {
+    // ignore
+  }
+
   refs = { dim, box, handle, handleTop, hint, label, guideV, guideH };
   // Pin AFTER refs is set: pairs with the unpin in destroyOverlay, so a
   // pending shadow-host cleanup can never yank a live overlay (see pinUiRoot).
@@ -372,6 +420,14 @@ export function getOverlay(): OverlayRefs | null {
 }
 
 export function destroyOverlay(): void {
+  if (trapReg) {
+    try {
+      trapReg.root.removeEventListener("keydown", trapReg.fn, true);
+    } catch {
+      // ignore
+    }
+    trapReg = null;
+  }
   if (refs) {
     for (const el of [refs.dim, refs.hint, refs.label, refs.guideV, refs.guideH]) {
       try {

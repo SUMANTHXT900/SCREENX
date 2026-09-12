@@ -12,7 +12,7 @@ export class CaptureSession {
     if (this.locked) {
       throw new CaptureError(
         "CAPTURE_IN_PROGRESS",
-        "A capture is already running. Please wait for it to finish before starting another."
+        `A ${this.label} capture is already running. Please wait for it to finish before starting another.`
       );
     }
     this.locked = true;

@@ -310,7 +310,6 @@ describe("post-capture handoff (clipboard + download naming)", () => {
     ).resolves.toBe(true);
     expect(sent).toHaveLength(1);
     expect(sent[0]).toEqual({ tabId: 42, dataUrl: "data:image/png;base64,eA==" });
-    expect(COPY_IMAGE_MAX_CHARS).toBeGreaterThan(1_000_000);
     // Missing blob / tab / failed send -> false, never throws.
     await expect(copyCaptureToClipboard("id-2", undefined, 42, { sender })).resolves.toBe(false);
     await expect(

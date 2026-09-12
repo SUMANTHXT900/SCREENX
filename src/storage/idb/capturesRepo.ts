@@ -93,6 +93,32 @@ export async function deleteCapture(id: string): Promise<void> {
   }
 }
 
+/**
+ * Lightweight row count for badges (popup). Uses IDB count() — no blob
+ * deserialization, safe to call on every popup open.
+ */
+export async function countCaptures(): Promise<number> {
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDB();
+    const n = await new Promise<number>((resolve, reject) => {
+      const tx = db!.transaction(STORE_NAME, "readonly");
+      const req = tx.objectStore(STORE_NAME).count();
+      req.onsuccess = () => resolve(typeof req.result === "number" ? req.result : 0);
+      req.onerror = () => reject(req.error ?? new Error("count failed"));
+    });
+    return n;
+  } catch {
+    return 0;
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 export async function listCaptures(limit = 100): Promise<CaptureRecord[]> {  let db: IDBDatabase | null = null;
   try {
     db = await openDB();

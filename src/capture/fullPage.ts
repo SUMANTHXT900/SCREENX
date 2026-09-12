@@ -19,6 +19,7 @@ import {
   persistCapture,
   toCaptureError,
 } from "./engine/finalize";
+import { deleteCapture, deleteGroup } from "@/storage/idb";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -33,10 +34,6 @@ const SCROLL_STABILIZE_MS = 160;
 
 export async function captureFullPage(): Promise<CaptureResult> {
   globalSession.acquire();
-  const t0 = performance.now();
-  let perfScroll = 0;
-  let perfCapture = 0;
-  let perfStitch = 0;
   let tab: chrome.tabs.Tab | null = null;
   let prepared = false;
   let lockToken: string | null = null;
@@ -63,20 +60,6 @@ export async function captureFullPage(): Promise<CaptureResult> {
       "Measure page"
     );
 
-    console.debug(
-      "[ScreenX] fullPage measure",
-      JSON.stringify({
-        controller: metrics.controllerType,
-        viewportWidth: metrics.viewportWidth,
-        viewportHeight: metrics.viewportHeight,
-        winViewportWidth: metrics.winViewportWidth,
-        winViewportHeight: metrics.winViewportHeight,
-        totalWidth: metrics.totalWidth,
-        totalHeight: metrics.totalHeight,
-        maxScrollY: metrics.maxScrollY,
-        dpr: metrics.dpr,
-      })
-    );
 
     const { totalWidth, totalHeight, dpr } = metrics;
     // Bitmap frame is ALWAYS the window viewport (captureVisibleTab photographs
@@ -141,9 +124,6 @@ export async function captureFullPage(): Promise<CaptureResult> {
 
     // Calculate dynamic total timeout based on chunks
     const totalTimeout = calculateTotalTimeout(positions.length, SCROLL_STABILIZE_MS, 600, 2000);
-    console.debug("[ScreenX] fullPage positions", JSON.stringify({ count: positions.length, positions, totalTimeout, occlusions: { top: occludedTopHeight, bottom: occludedBottomHeight } }));
-
-    const perfPlanning = performance.now() - t0;
 
     const loopResult = await executeCaptureLoop({
       tabId: tab.id,
@@ -160,8 +140,6 @@ export async function captureFullPage(): Promise<CaptureResult> {
     });
 
     const chunks = loopResult.chunks;
-    perfScroll = loopResult.perfScroll;
-    perfCapture = loopResult.perfCapture;
 
     sendProgress(tab.id, {
       mode: "full-page",
@@ -175,7 +153,6 @@ export async function captureFullPage(): Promise<CaptureResult> {
     const segments = planSegments(totalWidth, 0, totalHeight, dpr || 1);
     const groupId = segments.length > 1 ? crypto.randomUUID() : undefined;
 
-    const tStitchStart = performance.now();
     const parts: CaptureResult[] = [];
     for (const seg of segments) {
       let stitched;
@@ -222,8 +199,6 @@ export async function captureFullPage(): Promise<CaptureResult> {
         ...(groupId ? { groupId, partIndex: seg.index, partTotal: seg.total } : {}),
       });
     }
-    perfStitch = performance.now() - tStitchStart;
-
     const first = parts[0]!;
     first.stoppedEarly = loopResult.stoppedEarly || undefined;
 
@@ -235,41 +210,48 @@ export async function captureFullPage(): Promise<CaptureResult> {
       totalChunks,
     });
 
-    for (const part of parts) {
-      await persistCapture(part);
+    // Atomic-ish group persist: a quota failure mid-loop must not leave a
+    // partial stack behind (editor/history would render it as complete).
+    const persisted: string[] = [];
+    try {
+      for (const part of parts) {
+        await persistCapture(part);
+        persisted.push(part.id);
+      }
+    } catch (e) {
+      // Best-effort compensation for already-stored siblings, then rethrow.
+      try {
+        if (groupId) await deleteGroup(groupId);
+        else for (const id of persisted) await deleteCapture(id);
+      } catch {
+        // ignore compensation failure
+      }
+      throw e;
     }
 
-    console.debug("[ScreenX] full-page stitched", JSON.stringify({
-      chunks: chunks.length,
-      parts: parts.length,
-      totalWidth,
-      totalHeight,
-      viewportHeight,
-      dpr,
-      finalKB: parts.reduce((n, p) => n + (p.blob?.size ?? 0), 0) / 1024,
-    }));
 
     // No success toast here: the background handler shows the sticky
     // copy → editor/download choice toast after capture returns (it knows
     // the clipboard result, which engines cannot see).
 
-    const totalTime = performance.now() - t0;
-    const avgChunk = chunks.length > 0 ? (perfScroll + perfCapture) / chunks.length : 0;
-    console.log(`[ScreenX][PERF] type=full-page chunks=${chunks.length} parts=${parts.length} planning=${Math.round(perfPlanning)}ms scroll=${Math.round(perfScroll)}ms capture=${Math.round(perfCapture)}ms stitch=${Math.round(perfStitch)}ms total=${Math.round(totalTime)}ms avgChunk=${Math.round(avgChunk)}ms`);
-
     return first;
   } catch (e) {
     const err = toCaptureError(e);
-    notifyFailure(tab?.id, err, "Failed to capture full page.");
+    void notifyFailure(tab?.id, err, "Failed to capture full page.");
     throw err;
   } finally {
-    // Locks release FIRST and are individually guarded (see visible.ts).
+    // Restore WHILE holding the locks, release after (see visible.ts): a
+    // successor must not PREPARE while our retried RESTORE is still in flight.
+    // Releases are finally-nested + individually guarded against leaks.
     try {
-      if (lockToken) await releaseGlobalLock(lockToken);
-    } catch {
-      // ignore — TTL expires it anyway
+      await finalizeCapture(tab?.id, prepared);
+    } finally {
+      try {
+        if (lockToken) await releaseGlobalLock(lockToken);
+      } catch {
+        // ignore — TTL expires it anyway
+      }
+      globalSession.release();
     }
-    globalSession.release();
-    await finalizeCapture(tab?.id, prepared);
   }
 }

@@ -6,13 +6,18 @@
 import { CaptureError, type CaptureResult } from "@/types/capture";
 import { storePendingCapture } from "@/storage/captureHandoff";
 import { deleteCapture } from "@/storage/idb";
-import { sendToast, hideProgressHud, restoreCapture, clearCaptureBadge } from "@/messaging/client";
+import { sendToast, sendToastToTab, hideProgressHud, restoreCapture, clearCaptureBadge } from "@/messaging/client";
+import { notifyErrorFallback } from "@/background/handlers/commandHandler";
+// Static import — deliberately NOT dynamic: Vite wraps dynamic import() in
+// __vitePreload, whose DOM calls (document/window) throw inside the service
+// worker and mask the real outcome. This module is ~1KB; lazy-loading it
+// bought nothing and broke history recording outright.
+import { logHistoryEntry } from "@/storage/history/activityLog";
 
 /** Persist a capture; cleans up orphan IDB rows on session-pointer failure. */
 export async function persistCapture(result: CaptureResult): Promise<void> {
   try {
     await storePendingCapture(result);
-    console.debug("[ScreenX] persist ok:", result.id, { blobBytes: result.blob?.size });
   } catch (e) {
     if (e instanceof CaptureError && e.code === "STORAGE_FAILED") {
       try {
@@ -29,7 +34,6 @@ export async function persistCapture(result: CaptureResult): Promise<void> {
   }
   // Best-effort activity log (metadata only; never fails the capture).
   try {
-    const { logHistoryEntry } = await import("@/storage/history/activityLog");
     await logHistoryEntry({
       id: result.id,
       type: result.type,
@@ -56,17 +60,16 @@ export function notifySuccess(tabId: number | undefined, message: string): void 
   }
 }
 
-export function notifyFailure(tabId: number | undefined, err: CaptureError, fallback: string): void {
+export async function notifyFailure(tabId: number | undefined, err: CaptureError, fallback: string): Promise<void> {
   // USER_CANCELLED is silent by design; CAPTURE_IN_PROGRESS is reported by
   // the background handler with lock age — a second toast here would double
   // up on genuine overlap.
   if (tabId === undefined || err.code === "USER_CANCELLED" || err.code === "CAPTURE_IN_PROGRESS") return;
   try {
-    sendToast(tabId, {
-      type: "error",
-      title: "Capture Failed",
-      message: err.message || fallback,
-    });
+    const title = "Capture Failed";
+    const message = err.message || fallback;
+    const { delivered } = await sendToastToTab(tabId, { type: "error", title, message });
+    if (!delivered) await notifyErrorFallback(title, message);
   } catch {
     // ignore
   }
@@ -95,5 +98,4 @@ export async function finalizeCapture(tabId: number | undefined, prepared: boole
       );
     }
   }
-  console.debug("[ScreenX] finalize done", { tabId, prepared });
 }

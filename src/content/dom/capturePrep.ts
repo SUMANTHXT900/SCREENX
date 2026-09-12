@@ -40,7 +40,6 @@ export function prepareCapture(): { ok: true } {
   (document.head || document.documentElement).appendChild(styleEl);
   document.documentElement.classList.add("__screenx_capturing");
   prepared = true;
-  console.debug("[ScreenX] prepareCapture", JSON.stringify({ originalX, originalY, controller: scrollController.describe() }));
   return { ok: true as const };
 }
 
@@ -69,7 +68,6 @@ export function restoreCapture(): { ok: true } {
   }
   prepared = false;
   scrollController = null;
-  console.debug("[ScreenX] restoreCapture", JSON.stringify({ originalX, originalY }));
   return { ok: true as const };
 }
 

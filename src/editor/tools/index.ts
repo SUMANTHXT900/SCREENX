@@ -6,6 +6,7 @@ import {
   Circle,
   Crop,
   Droplet,
+  EyeOff,
   Hash,
   Highlighter,
   MousePointer2,
@@ -24,6 +25,7 @@ export type AnnotationTool =
   | "highlight"
   | "badge"
   | "blur"
+  | "redact"
   | "crop";
 
 export interface ToolDef {
@@ -42,7 +44,8 @@ export const TOOLS: ToolDef[] = [
   { id: "pencil", label: "Pencil", cursor: "crosshair", Icon: Pencil },
   { id: "highlight", label: "Highlighter", cursor: "crosshair", Icon: Highlighter },
   { id: "badge", label: "Step badge", cursor: "copy", Icon: Hash },
-  { id: "blur", label: "Blur / redact", cursor: "crosshair", Icon: Droplet },
+  { id: "blur", label: "Blur", cursor: "crosshair", Icon: Droplet },
+  { id: "redact", label: "Redact (opaque)", cursor: "crosshair", Icon: EyeOff },
   { id: "crop", label: "Crop", cursor: "crosshair", Icon: Crop },
 ];
 

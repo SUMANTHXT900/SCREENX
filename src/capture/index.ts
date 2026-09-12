@@ -52,7 +52,6 @@ export async function openEditorForCapture(captureId: string): Promise<void> {
 /** Open a capture result — routes auto-split groups to the stacked group view. */
 export async function openEditorForCaptureResult(result: { id: string; groupId?: string }): Promise<void> {
   const url = result.groupId ? getGroupEditorUrl(result.groupId) : getEditorUrl(result.id);
-  console.debug("[ScreenX] opening editor:", url);
   if (typeof chrome !== "undefined" && chrome.tabs?.create) {
     await chrome.tabs.create({ url });
   } else {

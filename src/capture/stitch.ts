@@ -22,17 +22,6 @@ export interface StitchInput {
 }
 
 export async function stitchImages(input: StitchInput) {
-  console.debug(
-    "[ScreenX] stitchImages input",
-    JSON.stringify({
-      chunks: input.chunks.length,
-      totalWidth: input.totalWidth,
-      totalHeight: input.totalHeight,
-      viewportWidth: input.viewportWidth,
-      viewportHeight: input.viewportHeight,
-      dpr: input.dpr,
-    })
-  );
 
   const stitcher = createStitcher({
     chunks: input.chunks,

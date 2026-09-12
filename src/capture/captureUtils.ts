@@ -1,6 +1,9 @@
 import { CaptureError } from "@/types";
 
-const RESTRICTED_PREFIXES = ["chrome://", "chrome-extension://", "edge://", "about:", "chrome-search://", "view-source:", "devtools://"];
+/** Browser/chrome-internal schemes capture can never run on. Kept in sync
+ * with the clipboard classifier (background/handlers/clipboardTarget.ts) —
+ * a page restricted for one surface is restricted for the other. */
+const RESTRICTED_PREFIXES = ["chrome://", "chrome-extension://", "edge://", "brave://", "opera://", "vivaldi://", "about:", "chrome-search://", "view-source:", "devtools://"];
 
 export function isRestrictedUrl(url: string | undefined): boolean {
   if (!url) return false;

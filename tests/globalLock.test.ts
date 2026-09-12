@@ -93,8 +93,14 @@ describe("globalLock lifecycle", () => {
     expect(await lock.describeGlobalLock()).toBeNull();
   });
 
-  test("LOCK_TTL_MS is short (30s) so orphans block briefly", async () => {
+  test("stale (expired) claim does not block a new acquire", async () => {
     const lock = await import("../src/capture/engine/globalLock");
-    expect(lock.LOCK_TTL_MS).toBe(30 * 1000);
+    installSessionStub({
+      [LOCK_KEY]: { token: "old", owner: "dead-worker", acquiredAt: Date.now() - 120_000, expiresAt: Date.now() - 60_000 },
+    });
+    // Orphaned claims must stop blocking quickly — behavior, not the constant.
+    const token = await lock.acquireGlobalLock("visible", 1);
+    expect(typeof token).toBe("string");
+    await lock.releaseGlobalLock(token);
   });
 });

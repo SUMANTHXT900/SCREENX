@@ -24,6 +24,14 @@ export interface ToastAction {
    * button then falls back to the service-worker round trip.
    */
   dataUrl?: string;
+  /**
+   * Single-toast grant binding this button to the tab it was shown in.
+   * The worker verifies it before running the action, so a content script
+   * in another tab cannot drive actions with a guessed captureId.
+   * Absent on legacy toasts (pre-grant builds) — those fall back to the
+   * same-tab rule in the router.
+   */
+  nonce?: string;
 }
 
 export interface ToastOptions {
@@ -41,6 +49,8 @@ export interface ToastActionMessage {
   action: ToastAction["id"];
   captureId: string;
   groupId?: string;
+  /** Echo of the grant nonce (see ToastAction.nonce). Absent on legacy toasts. */
+  nonce?: string;
 }
 
 export interface ProgressPayload {
@@ -79,6 +89,9 @@ export const MESSAGE_TYPES = {
   RESOLVE_CONTAINER: "SCREENX_RESOLVE_CONTAINER",
   TOAST_ACTION: "SCREENX_TOAST_ACTION",
   COPY_IMAGE: "SCREENX_COPY_IMAGE",
+  DOWNLOAD_BLOB: "SCREENX_DOWNLOAD_BLOB",
+  DISMISS_SELECTION: "SCREENX_DISMISS_SELECTION",
+  RESET_CAPTURE_STATE: "SCREENX_RESET_CAPTURE_STATE",
 } as const;
 
 export type MessageTypeValue = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
@@ -199,6 +212,27 @@ export interface CopyImageResponse {
   transientActivation?: boolean;
 }
 
+/**
+ * Large-download fallback: chrome.downloads can't take >~50MB data URLs,
+ * so the worker hands the bytes to the content script for a synthetic
+ * <a download> click in page context.
+ */
+export interface DownloadBlobMessage {
+  type: "SCREENX_DOWNLOAD_BLOB";
+  dataUrl: string;
+  filename: string;
+}
+
+/** Silent teardown for a superseded selection wait — never an error surface. */
+export interface DismissSelectionMessage {
+  type: "SCREENX_DISMISS_SELECTION";
+}
+
+/** Force-reset content-script capture state (stale-script recovery). */
+export interface ResetCaptureStateMessage {
+  type: "SCREENX_RESET_CAPTURE_STATE";
+}
+
 // ── Discriminated Union ─────────────────────────────────────────────
 
 export type ExtensionMessage =
@@ -219,7 +253,10 @@ export type ExtensionMessage =
   | TriggerCaptureMessage
   | ResolveContainerMessage
   | CopyImageMessage
-  | ToastActionMessage;
+  | ToastActionMessage
+  | DownloadBlobMessage
+  | DismissSelectionMessage
+  | ResetCaptureStateMessage;
 
 export type ExtensionMessageType = ExtensionMessage["type"];
 

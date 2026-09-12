@@ -89,10 +89,10 @@ describe("Stitcher math tests", () => {
     const maxScrollY = 60000;
     const positions = calculateRangePositions(startY, endY, viewportHeight, maxScrollY, 150, 0, 0);
 
-    // Height is 30,461px with 800px viewport -> requires ~39 chunks
-    expect(positions.length).toBeGreaterThanOrEqual(38);
-    expect(positions.length).toBeLessThanOrEqual(45);
-    expect(positions[0]).toBeLessThanOrEqual(startY);
+    // Height is 30,461px with 800px viewport, step 800 → exactly 39 chunks.
+    expect(positions.length).toBe(39);
+    expect(positions[0]).toBe(startY);
+    expect(positions[positions.length - 1]).toBe(54517);
     expect(positions[positions.length - 1]! + viewportHeight).toBeGreaterThanOrEqual(endY);
   });
 
@@ -104,7 +104,8 @@ describe("Stitcher math tests", () => {
     const botOcclusion = 40;
     const positions = calculateRangePositions(startY, endY, vpH, 50000, 150, topOcclusion, botOcclusion);
 
-    expect(positions.length).toBeGreaterThan(45);
+    // 40,000px at step 780 (900-80-40) → exactly 52 chunks.
+    expect(positions.length).toBe(52);
 
     // Verify mathematical continuity
     let coveredDocY = startY;
