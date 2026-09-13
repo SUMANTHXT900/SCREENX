@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "ScreenX",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "Premium screenshot capture — visible, full-page, and area — with editor, workspace, and history.",
   "icons": {
     "16": "icons/icon16.png",
