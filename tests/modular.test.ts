@@ -20,8 +20,8 @@ import { calculatePositions, calculateRangePositions } from "../src/capture/capt
 
 describe("unified planner entry points", () => {
   test("planFullPagePositions matches compat re-export", () => {
-    expect(planFullPagePositions(50000, 800, 50000, 300, 320, 320)).toEqual(
-      calculatePositions(50000, 800, 50000, 300, 320, 320)
+    expect(planFullPagePositions(50000, 800, 50000, 300, 60, 40)).toEqual(
+      calculatePositions(50000, 800, 50000, 300, 60, 40)
     );
   });
 
@@ -276,7 +276,12 @@ describe("snapChunkCoord (top-anchor rule)", () => {
     expect(snapChunkCoord(0, 0)).toBe(0);
     expect(snapChunkCoord(0, 1)).toBe(0);
     expect(snapChunkCoord(0, 2)).toBe(0);
-    expect(snapChunkCoord(0, 3)).toBe(3);
+    // 4px tolerance (ORIGIN_SNAP_PX): smooth-scroll residue of 3–4px would
+    // otherwise discard ~120 trimmed top rows (white band) while the seam
+    // aligner absorbs ≤4px residue. Non-origin requests never snap.
+    expect(snapChunkCoord(0, 3)).toBe(0);
+    expect(snapChunkCoord(0, 4)).toBe(0);
+    expect(snapChunkCoord(0, 5)).toBe(5);
     expect(snapChunkCoord(500, 501)).toBe(501);
   });
 });

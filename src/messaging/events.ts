@@ -155,8 +155,8 @@ export interface SelectionCompleteMessage {
  *
  * Frames: the box travels in VIEWPORT px (also used to resolve the scroll
  * container). startY/endY/x are derived capture-side by selectionRangeToTargets
- * (scroll + viewport offsets, no rect correction — see its invariant). x is
- * document px because the loop pins horizontal scroll to 0 every strip.
+ * as TRUE content rows/cols (scroll + viewport offset − container rect at
+ * selection time); the stitcher maps back through the per-chunk rect.
  */
 export interface RegionSelection {
   boxLeft: number;
@@ -165,6 +165,9 @@ export interface RegionSelection {
   boxHeight: number;
   startScrollTop: number;
   endScrollTop: number;
+  /** Scroller viewport offset at selection time (0,0 for window). Optional for backward compat. */
+  containerRectTop?: number;
+  containerRectLeft?: number;
   x: number;
   width: number;
 }

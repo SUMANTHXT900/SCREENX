@@ -22,6 +22,8 @@ export default function WorkspaceApp(): React.JSX.Element {
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [visibleCount, setVisibleCount] = React.useState(PAGE_SIZE);
+  // Mirror of `urls` for cleanup paths — revoked without setState.
+  const urlsRef = React.useRef<Record<string, string>>({});
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -31,25 +33,24 @@ export default function WorkspaceApp(): React.JSX.Element {
       setRecords(list);
       // Only thumbnail the group cover — full parts load on demand in the editor.
       const covers = new Set(toGroups(list).map((g) => g.first.id));
-      setUrls((prev) => {
-        for (const u of Object.values(prev)) {
-          try {
-            URL.revokeObjectURL(u);
-          } catch {
-            // ignore
-          }
+      for (const u of Object.values(urlsRef.current)) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          // ignore
         }
-        const next: Record<string, string> = {};
-        for (const r of list) {
-          if (!covers.has(r.id)) continue;
-          try {
-            next[r.id] = URL.createObjectURL(r.blob);
-          } catch {
-            // ignore single failures
-          }
+      }
+      const next: Record<string, string> = {};
+      for (const r of list) {
+        if (!covers.has(r.id)) continue;
+        try {
+          next[r.id] = URL.createObjectURL(r.blob);
+        } catch {
+          // ignore single failures
         }
-        return next;
-      });
+      }
+      urlsRef.current = next;
+      setUrls(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -60,16 +61,14 @@ export default function WorkspaceApp(): React.JSX.Element {
   React.useEffect(() => {
     void refresh();
     return () => {
-      setUrls((prev) => {
-        for (const u of Object.values(prev)) {
-          try {
-            URL.revokeObjectURL(u);
-          } catch {
-            // ignore
-          }
+      for (const u of Object.values(urlsRef.current)) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          // ignore
         }
-        return {};
-      });
+      }
+      urlsRef.current = {};
     };
   }, [refresh]);
 
@@ -180,21 +179,20 @@ export default function WorkspaceApp(): React.JSX.Element {
         }
       }
       setRecords((prev) => prev.filter((r) => !g.ids.includes(r.id)));
-      setUrls((prev) => {
-        const next = { ...prev };
-        for (const id of g.ids) {
-          const u = next[id];
-          if (u) {
-            try {
-              URL.revokeObjectURL(u);
-            } catch {
-              // ignore
-            }
-            delete next[id];
+      const next = { ...urlsRef.current };
+      for (const id of g.ids) {
+        const u = next[id];
+        if (u) {
+          try {
+            URL.revokeObjectURL(u);
+          } catch {
+            // ignore
           }
+          delete next[id];
         }
-        return next;
-      });
+      }
+      urlsRef.current = next;
+      setUrls(next);
     },
     []
   );

@@ -330,13 +330,15 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       // ignore — prepareCapture resolves on its own
     }
 
-    // Range targets share the stitcher's frame (scroll + viewport offsets —
-    // see selectionRangeToTargets): no container-rect correction here.
+    // Range targets are TRUE content rows: box + scroll − container rect at
+    // selection time (explicit frame; the stitcher maps back through the
+    // per-chunk rect, so window scroll between selection and capture is fine).
     const converted = selectionRangeToTargets(
       selection.boxTop,
       selection.boxHeight,
       selection.startScrollTop,
-      selection.endScrollTop
+      selection.endScrollTop,
+      selection.containerRectTop ?? 0
     );
     const startY = Math.max(0, converted.startY);
     const endY = converted.endY;

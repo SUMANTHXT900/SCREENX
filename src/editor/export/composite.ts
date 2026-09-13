@@ -60,11 +60,14 @@ function drawArrowHead(
 /**
  * Render base image + shapes. If crop is given, the canvas is the crop region
  * and shapes shift by (-crop.x, -crop.y) — canvas clips overflow.
+ * Pass `background` (e.g. "#ffffff") for JPEG/WebP exports so transparent
+ * pixels don't encode as black; PNG callers leave it unset.
  */
 export function renderComposite(
   base: HTMLImageElement,
   shapes: Shape[],
-  crop?: { x: number; y: number; w: number; h: number } | null
+  crop?: { x: number; y: number; w: number; h: number } | null,
+  background?: string | null
 ): HTMLCanvasElement {
   const sx = crop ? Math.max(0, Math.round(crop.x)) : 0;
   const sy = crop ? Math.max(0, Math.round(crop.y)) : 0;
@@ -77,6 +80,10 @@ export function renderComposite(
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas context unavailable.");
 
+  if (background) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
   ctx.drawImage(base, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
   paintShapes(ctx, shapes, -sx, -sy, () => {
     ctx.drawImage(base, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
@@ -92,7 +99,8 @@ export function renderComposite(
  */
 export function renderStackedComposite(
   images: HTMLImageElement[],
-  shapes: Shape[]
+  shapes: Shape[],
+  background?: string | null
 ): HTMLCanvasElement {
   if (images.length === 0) throw new Error("No images to export.");
   const width = Math.max(...images.map((i) => i.naturalWidth));
@@ -102,6 +110,11 @@ export function renderStackedComposite(
   canvas.height = Math.max(1, height);
   const ctx = canvas.getContext("2d");
   if (!ctx) throw new Error("Canvas context unavailable.");
+
+  if (background) {
+    ctx.fillStyle = background;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
 
   let y = 0;
   for (const img of images) {

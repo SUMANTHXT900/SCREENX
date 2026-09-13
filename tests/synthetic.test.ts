@@ -125,14 +125,24 @@ describe("Stitcher math tests", () => {
   });
 
   test("Test 7: Adaptive step scaling prevents exceeding maxPositions on small-step scenarios", () => {
-    // Total height 50,000 with 150px step would normally require 334 viewports (> 150)
-    // Adaptive stepping must scale step up to fit within 300 positions without throwing
-    const positions = calculatePositions(50000, 800, 50000, 300, 320, 320);
+    // Total height 50,000 with safe step 700 (800 − 60 − 40) needs 72 chunks:
+    // fits without adapting.
+    const positions = calculatePositions(50000, 800, 50000, 300, 60, 40);
 
     expect(positions.length).toBeGreaterThan(0);
     expect(positions.length).toBeLessThanOrEqual(300);
     // Verify last position reaches near the end
     expect(positions[positions.length - 1]! + 800).toBeGreaterThanOrEqual(50000);
+  });
+
+  test("Test 7b: Adaptive step refuses occlusion-unsafe steps (honest PAGE_TOO_LARGE)", () => {
+    // 320+320px occlusions on an 800px viewport leave a 160px safe step;
+    // 50,000px would need 313 chunks. The old code widened the step past the
+    // safe step (167 > 160), silently dropping 7 rows per seam. Now it throws
+    // instead of returning a gappy plan as success.
+    expect(() => calculatePositions(50000, 800, 50000, 300, 320, 320)).toThrow(
+      /exceeds 300 limit/
+    );
   });
 
   test("Test 8: Full 65,000px capture plans within 300 viewports with valid overlaps", () => {

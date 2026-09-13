@@ -14,6 +14,7 @@ import Toolbar from "./components/Toolbar";
 import CanvasViewport, { type Zoom } from "./components/CanvasViewport";
 import ExportModal from "./components/ExportModal";
 import { loadImage, offsetShapes, renderComposite, renderStackedComposite, canvasToBlob } from "./export/composite";
+import { MAX_CANVAS_HEIGHT, MAX_CANVAS_PIXELS, MAX_CANVAS_WIDTH } from "@/capture/stitch/limits";
 
 type LoadState = "loading" | "empty" | "ready" | "error";
 
@@ -68,6 +69,21 @@ interface AnnotationsDraft {
   savedAt: number;
 }
 
+/** Pre-flight canvas size check — fail fast with a helpful message. */
+function assertExportSize(w: number, h: number, multi: boolean): void {
+  if (!(w > 0 && h > 0)) throw new Error("Image has no pixels to export.");
+  if (w > MAX_CANVAS_WIDTH || h > MAX_CANVAS_HEIGHT || w * h > MAX_CANVAS_PIXELS) {
+    const err = new Error(
+      `Export is ${w}×${h}px, past browser canvas limits (${MAX_CANVAS_WIDTH}px per side, ${Math.round(MAX_CANVAS_PIXELS / 1_000_000)}MP total). ` +
+        (multi
+          ? "Download the parts individually instead."
+          : "Crop to a smaller region first.")
+    );
+    err.name = "CanvasLimitError";
+    throw err;
+  }
+}
+
 export default function EditorApp(): React.JSX.Element {
   const [state, setState] = React.useState<LoadState>("loading");
   const [capture, setCapture] = React.useState<PendingCapture | null>(null);
@@ -82,9 +98,25 @@ export default function EditorApp(): React.JSX.Element {
   const copiedTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shown when the requested captureId missed and the latest was opened.
   const [usedFallback, setUsedFallback] = React.useState(false);
-  // Pre-crop snapshot (parts + shapes) for one-step revert. Cropping bakes
-  // annotations into pixels, so undo lives here instead of shape history.
-  const cropSnapshot = React.useRef<{ parts: PartView[]; shapes: unknown } | null>(null);
+  // Pre-crop snapshot (decoded Blobs + shapes) for one-step revert. Cropping
+  // bakes annotations into pixels, so undo lives here instead of shape
+  // history. Blobs (not URLs) are snapshotted: the live URLs are revoked on
+  // crop, and revert mints fresh object URLs from these Blobs.
+  const cropSnapshot = React.useRef<{ blobs: { id: string; blob: Blob }[]; shapes: unknown } | null>(null);
+  // Crop-result URLs owned outside the load effect — revoked on unmount.
+  const cropOwned = React.useRef<string[]>([]);
+  React.useEffect(() => {
+    const owned = cropOwned.current;
+    return () => {
+      for (const u of owned) {
+        try {
+          URL.revokeObjectURL(u);
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
   const [canRevertCrop, setCanRevertCrop] = React.useState(false);
 
   const resetEditor = useEditorStore((s) => s.reset);
@@ -208,6 +240,8 @@ export default function EditorApp(): React.JSX.Element {
         }
 
         if (pending?.dataUrl) {
+          // Single-capture blob: URLs are minted in loadFromIdb — track for revoke.
+          if (pending.dataUrl.startsWith("blob:")) track(pending.dataUrl);
           setCapture(pending);
           setParts([{ id: pending.id, url: pending.dataUrl }]);
           resetEditor();
@@ -260,15 +294,31 @@ export default function EditorApp(): React.JSX.Element {
     // Ownership rule: snapshot urls must stay alive until revert (or a newer
     // snapshot replaces them). Revoking the original here is what produced
     // the broken-image-on-revert bug — the snapshot held the same url.
-    const snapshotUrls = new Set(parts.map((p) => p.url));
-    const prevSnap = cropSnapshot.current;
     try {
-      // Snapshot for one-step revert (crop bakes pixels + annotations).
-      cropSnapshot.current = { parts, shapes: st.shapes };
+      // Snapshot decoded Blobs BEFORE revoking: revert mints fresh URLs.
+      const blobs: { id: string; blob: Blob }[] = [];
+      for (const p of parts) {
+        try {
+          const res = await fetch(p.url);
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          blobs.push({ id: p.id, blob: await res.blob() });
+        } catch (e) {
+          throw new Error(`Crop snapshot failed for part ${p.id.slice(0, 8)}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      cropSnapshot.current = { blobs, shapes: st.shapes };
       let nextUrl: string;
       if (multiPart) {
         // Crop the flattened stack: annotations bake in, result is single.
-        const imgs = await Promise.all(parts.map((p) => loadImage(p.url)));
+        // Decode sequentially so a failure names the part.
+        const imgs: HTMLImageElement[] = [];
+        for (let i = 0; i < parts.length; i++) {
+          try {
+            imgs.push(await loadImage(parts[i]!.url));
+          } catch (e) {
+            throw new Error(`Part ${i + 1}/${parts.length} failed to decode: ${e instanceof Error ? e.message : String(e)}`);
+          }
+        }
         const flat = renderStackedComposite(imgs, st.shapes);
         const canvas = document.createElement("canvas");
         canvas.width = Math.max(1, Math.min(flat.width - cx, cw));
@@ -278,25 +328,24 @@ export default function EditorApp(): React.JSX.Element {
         ctx.drawImage(flat, cx, cy, canvas.width, canvas.height, 0, 0, canvas.width, canvas.height);
         const blob = await canvasToBlob(canvas, "png", 1);
         nextUrl = URL.createObjectURL(blob);
+        cropOwned.current.push(nextUrl);
         st.commit([]);
       } else {
         const img = await loadImage(first.url);
         const canvas = renderComposite(img, [], { x: cx, y: cy, w: cw, h: ch });
         const blob = await canvasToBlob(canvas, "png", 1);
         nextUrl = URL.createObjectURL(blob);
+        cropOwned.current.push(nextUrl);
         // Shift annotations into cropped coordinates so they stay put.
         st.commit(offsetShapes(st.shapes, -cx, -cy));
       }
-      // Retire the PREVIOUS snapshot's urls (a crop-over-crop orphan) — but
-      // never urls the new snapshot still references (see ownership rule).
-      if (prevSnap) {
-        for (const p of prevSnap.parts) {
-          if (!snapshotUrls.has(p.url) && p.url.startsWith("blob:")) {
-            try {
-              URL.revokeObjectURL(p.url);
-            } catch {
-              // ignore
-            }
+      // Old part URLs are safe to revoke now — the snapshot holds Blobs.
+      for (const p of parts) {
+        if (p.url.startsWith("blob:")) {
+          try {
+            URL.revokeObjectURL(p.url);
+          } catch {
+            // ignore
           }
         }
       }
@@ -315,22 +364,27 @@ export default function EditorApp(): React.JSX.Element {
 
   const revertCrop = React.useCallback(() => {
     const snap = cropSnapshot.current;
-    if (!snap) {
-      return;
-    }
+    // Snapshot holds decoded Blobs (pre-crop urls were revoked at crop time):
+    // revoke the crop-result urls, then mint fresh ones from the blobs.
+    if (!snap) return;
     // Revoke only urls the snapshot does NOT reference (the crop results).
     // The snapshot's own urls stay alive — revoking them is the old bug.
-    const keep = new Set(snap.parts.map((p) => p.url));
-    for (const part of parts) {
-      if (!keep.has(part.url) && part.url.startsWith("blob:")) {
+    for (const p of parts) {
+      if (p.url.startsWith("blob:")) {
         try {
-          URL.revokeObjectURL(part.url);
+          URL.revokeObjectURL(p.url);
         } catch {
           // ignore
         }
       }
     }
-    setParts(snap.parts);
+    // Mint fresh object URLs — the pre-crop URLs were revoked on crop.
+    const fresh = snap.blobs.map((b) => {
+      const url = URL.createObjectURL(b.blob);
+      cropOwned.current.push(url);
+      return { id: b.id, url };
+    });
+    setParts(fresh);
     useEditorStore.setState({
       // Guard like drafts: the snapshot may predate the current renderer.
       shapes: Array.isArray(snap.shapes) ? snap.shapes.filter(isValidShape) : [],
@@ -343,19 +397,49 @@ export default function EditorApp(): React.JSX.Element {
     setCanRevertCrop(false);
   }, [parts]);
 
-  const renderForExport = React.useCallback(async () => {
+  const renderForExport = React.useCallback(async (background: string | null = null) => {
     if (parts.length === 0) throw new Error("No image loaded.");
-    const imgs = await Promise.all(parts.map((p) => loadImage(p.url)));
-    if (imgs.length === 1) return renderComposite(imgs[0]!, useEditorStore.getState().shapes);
-    return renderStackedComposite(imgs, useEditorStore.getState().shapes);
+    // Sequential decode so a failure names the part that broke.
+    const imgs: HTMLImageElement[] = [];
+    for (let i = 0; i < parts.length; i++) {
+      const p = parts[i]!;
+      try {
+        imgs.push(await loadImage(p.url));
+      } catch (e) {
+        const detail = e instanceof Error ? e.message : String(e);
+        throw new Error(parts.length > 1 ? `Part ${i + 1}/${parts.length} failed to decode: ${detail}` : detail);
+      }
+    }
+    // Pre-check canvas limits before allocating a potentially huge canvas.
+    const w = imgs.length === 1 ? imgs[0]!.naturalWidth : Math.max(...imgs.map((im) => im.naturalWidth));
+    const h = imgs.length === 1 ? imgs[0]!.naturalHeight : imgs.reduce((n, im) => n + im.naturalHeight, 0);
+    assertExportSize(w, h, imgs.length > 1);
+    if (imgs.length === 1) return renderComposite(imgs[0]!, useEditorStore.getState().shapes, null, background);
+    return renderStackedComposite(imgs, useEditorStore.getState().shapes, background);
   }, [parts]);
+
+  const downloadPartsIndividually = React.useCallback(() => {
+    parts.forEach((p, i) => {
+      try {
+        const a = document.createElement("a");
+        a.href = p.url;
+        a.download = `${fileBase}-part${i + 1}of${parts.length}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      } catch {
+        // ignore single failures — other parts still download
+      }
+    });
+  }, [parts, fileBase]);
 
   const doDownload = React.useCallback(async () => {
     setExportBusy(true);
     setExportError(null);
     try {
       const { exportFormat, exportQuality } = useSettingsStore.getState();
-      const canvas = await renderForExport();
+      // JPEG has no alpha — paint white under it instead of encoding black.
+      const canvas = await renderForExport(exportFormat === "png" ? null : "#ffffff");
       const blob = await canvasToBlob(canvas, exportFormat, exportQuality);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -373,27 +457,69 @@ export default function EditorApp(): React.JSX.Element {
       }, 10_000);
       setExportOpen(false);
     } catch (e) {
-      const msg =
-        e instanceof Error
-          ? `${e.message} Tip: absurdly tall stacks can exceed canvas limits — download parts individually from Workspace.`
-          : String(e);
-      setExportError(msg);
+      if (e instanceof Error && e.name === "CanvasLimitError" && parts.length > 1) {
+        downloadPartsIndividually();
+        setExportError(`${e.message} Downloaded the ${parts.length} parts individually instead.`);
+      } else {
+        setExportError(
+          e instanceof Error
+            ? `${e.message} Tip: absurdly tall stacks can exceed canvas limits — download parts individually from Workspace.`
+            : String(e)
+        );
+      }
     } finally {
       setExportBusy(false);
     }
-  }, [renderForExport, fileBase]);
+  }, [renderForExport, fileBase, parts.length, downloadPartsIndividually]);
 
   const doCopy = React.useCallback(async () => {
     try {
-      const canvas = await renderForExport();
-      const blob = await canvasToBlob(canvas, "png", 1);
-      await navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]);
+      if (typeof ClipboardItem === "undefined" || !navigator.clipboard?.write) {
+        throw new Error("Clipboard image copy isn't supported in this browser — use Download instead.");
+      }
+      try {
+        const status = await navigator.permissions?.query({ name: "clipboard-write" as PermissionName });
+        if (status?.state === "denied") {
+          throw new Error("Clipboard permission is denied — allow clipboard access in the browser settings or use Download instead.");
+        }
+      } catch (e) {
+        // permissions API unavailable for this name — try the write anyway,
+        // unless we already know permission was denied.
+        if (e instanceof Error && /clipboard permission is denied/i.test(e.message)) throw e;
+      }
+      const canvas = await renderForExport(null);
+      const writePng = (c: HTMLCanvasElement): Promise<void> =>
+        canvasToBlob(c, "png", 1).then((blob) => navigator.clipboard.write([new ClipboardItem({ "image/png": blob })]));
+      try {
+        await writePng(canvas);
+      } catch (e) {
+        if (e instanceof Error && e.name === "NotAllowedError") {
+          throw new Error("Copy blocked — clipboard permission was denied. Use Download instead.");
+        }
+        // Large canvases can exceed clipboard limits — retry once at half scale.
+        const small = document.createElement("canvas");
+        small.width = Math.max(1, Math.floor(canvas.width / 2));
+        small.height = Math.max(1, Math.floor(canvas.height / 2));
+        const sctx = small.getContext("2d");
+        if (!sctx) throw e;
+        sctx.drawImage(canvas, 0, 0, small.width, small.height);
+        try {
+          await writePng(small);
+        } catch {
+          throw e;
+        }
+        setCopied(true);
+        if (copiedTimer.current) clearTimeout(copiedTimer.current);
+        copiedTimer.current = setTimeout(() => setCopied(false), 2000);
+        setExportError("Full-size copy failed — copied a half-size image instead. Use Download for full quality.");
+        setExportOpen(true);
+        return;
+      }
       setCopied(true);
       if (copiedTimer.current) clearTimeout(copiedTimer.current);
       copiedTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Copy failed — clipboard access was denied.";
-      setExportError(msg);
+      setExportError(e instanceof Error ? e.message : "Copy failed — clipboard access was denied. Use Download instead.");
       setExportOpen(true);
     }
   }, [renderForExport]);
@@ -409,7 +535,9 @@ export default function EditorApp(): React.JSX.Element {
         const shapes = useEditorStore.getState().shapes;
         const payload: AnnotationsDraft = { shapes, partsCount: parts.length, savedAt: Date.now() };
         if (typeof chrome !== "undefined" && chrome.storage?.local) {
-          void chrome.storage.local.set({ [key]: payload });
+          void (chrome.storage.local.set({ [key]: payload }) as Promise<void>).catch(() => {
+            // best-effort — quota etc. must never break editing
+          });
         } else {
           try {
             localStorage.setItem(key, JSON.stringify(payload));
@@ -439,8 +567,14 @@ export default function EditorApp(): React.JSX.Element {
           draft = raw ? (JSON.parse(raw) as AnnotationsDraft) : null;
         }
         if (!cancelled && draft && Array.isArray(draft.shapes) && draft.partsCount === parts.length) {
+          // Dirty-guard: never clobber shapes the user already made this session.
+          if (useEditorStore.getState().shapes.length > 0) return;
+          const clean = (draft.shapes as unknown[]).filter(isValidShape);
+          if (clean.length !== (draft.shapes as unknown[]).length) {
+            console.warn("[ScreenX] dropped malformed annotation shapes from draft");
+          }
           useEditorStore.setState({
-            shapes: draft.shapes.filter(isValidShape),
+            shapes: clean,
             past: [],
             future: [],
             selectedId: null,
@@ -717,6 +851,7 @@ export default function EditorApp(): React.JSX.Element {
           fileName={fileBase}
           onClose={() => setExportOpen(false)}
           onDownload={() => void doDownload()}
+          onDownloadParts={multiPart ? downloadPartsIndividually : undefined}
         />
       </main>
     </div>

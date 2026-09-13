@@ -32,30 +32,36 @@ function hostOf(url: string | undefined): string {
 export default function HistoryApp(): React.JSX.Element {
   const [entries, setEntries] = React.useState<HistoryEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
+  const [error, setError] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Workspace is the source of truth: backfill log lines for images that
-      // predate logging (or were missed) and drop orphans — the two views
-      // stay in sync by construction. Tombstoned ids (user-deleted) are
-      // never backfilled, so deletes stick.
-      const [log, records, tombstoned] = await Promise.all([
-        listHistory(),
-        listCaptures(200).catch(() => []),
-        listTombstones(),
-      ]);
-      const { visible, backfill } = reconcileHistory(log, records, tombstoned);
-      for (const entry of backfill) {
-        try {
-          await logHistoryEntry(entry);
-        } catch {
-          // ignore — best-effort
+      try {
+        // Workspace is the source of truth: backfill log lines for images that
+        // predate logging (or were missed) and drop orphans — the two views
+        // stay in sync by construction. Tombstoned ids (user-deleted) are
+        // never backfilled, so deletes stick.
+        const [log, records, tombstoned] = await Promise.all([
+          listHistory(),
+          listCaptures(200).catch(() => []),
+          listTombstones(),
+        ]);
+        const { visible, backfill } = reconcileHistory(log, records, tombstoned);
+        for (const entry of backfill) {
+          try {
+            await logHistoryEntry(entry);
+          } catch {
+            // ignore — best-effort
+          }
         }
-      }
-      if (!cancelled) {
-        setEntries(visible);
-        setLoading(false);
+        if (!cancelled) {
+          setEntries(visible);
+        }
+      } catch (e) {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     })();
     return () => {
@@ -65,12 +71,20 @@ export default function HistoryApp(): React.JSX.Element {
 
   const [query, setQuery] = React.useState("");
   const clear = React.useCallback(async () => {
-    await clearHistory(entries.map((e) => e.id));
-    setEntries([]);
+    try {
+      await clearHistory(entries.map((e) => e.id));
+      setEntries([]);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, [entries]);
   const removeOne = React.useCallback(async (id: string) => {
-    await deleteHistoryEntry(id);
-    setEntries((prev) => prev.filter((e) => e.id !== id));
+    try {
+      await deleteHistoryEntry(id);
+      setEntries((prev) => prev.filter((e) => e.id !== id));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   }, []);
 
   const q = query.trim().toLowerCase();
@@ -150,7 +164,12 @@ export default function HistoryApp(): React.JSX.Element {
             <p className="mt-3 text-sm font-bold">Loading history…</p>
           </div>
         )}
-        {!loading && entries.length === 0 && (
+        {!loading && error && (
+          <div className="border-2 border-black bg-[#F87171] p-6 text-center text-sm font-bold text-black shadow-[4px_4px_0_#000]">
+            History couldn't load: {error}
+          </div>
+        )}
+        {!loading && !error && entries.length === 0 && (
           <div className="border-[3px] border-black bg-[#FFFDF7] p-12 text-center shadow-[6px_6px_0_#000]">
             <div className="mx-auto flex h-12 w-12 items-center justify-center border-2 border-black bg-[#4ADE80]">
               <Clock className="h-6 w-6 text-black" strokeWidth={2.25} />

@@ -3,11 +3,31 @@ import { CaptureError } from "@/types";
 /** Browser/chrome-internal schemes capture can never run on. Kept in sync
  * with the clipboard classifier (background/handlers/clipboardTarget.ts) —
  * a page restricted for one surface is restricted for the other. */
-const RESTRICTED_PREFIXES = ["chrome://", "chrome-extension://", "edge://", "brave://", "opera://", "vivaldi://", "about:", "chrome-search://", "view-source:", "devtools://"];
+const RESTRICTED_PREFIXES = [
+  "chrome://",
+  "chrome-extension://",
+  "chrome-untrusted://",
+  "edge://",
+  "brave://",
+  "opera://",
+  "vivaldi://",
+  "about:",
+  "chrome-search://",
+  "view-source:",
+  "devtools://",
+];
+const RESTRICTED_HOSTS = ["chrome.google.com", "chromewebstore.google.com"];
 
 export function isRestrictedUrl(url: string | undefined): boolean {
-  if (!url) return false;
-  return RESTRICTED_PREFIXES.some((p) => url.startsWith(p));
+  if (!url) return true;
+  if (RESTRICTED_PREFIXES.some((p) => url.startsWith(p))) return true;
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    if (RESTRICTED_HOSTS.some((h) => host === h || host.endsWith(`.${h}`))) return true;
+  } catch {
+    // Unparseable URL — let the injection attempt surface the real error.
+  }
+  return false;
 }
 
 export function queryActiveTab(): Promise<chrome.tabs.Tab> {

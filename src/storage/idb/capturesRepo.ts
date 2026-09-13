@@ -21,7 +21,7 @@ export interface CaptureRecord {
   partTotal?: number;
 }
 
-export async function putCapture(record: CaptureRecord): Promise<void> {
+async function putOnce(record: CaptureRecord): Promise<void> {
   let db: IDBDatabase | null = null;
   try {
     db = await openDB();
@@ -33,15 +33,56 @@ export async function putCapture(record: CaptureRecord): Promise<void> {
       req.onerror = () => reject(req.error ?? new Error("put failed"));
       tx.onerror = () => reject(tx.error ?? new Error("transaction failed"));
     });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    throw new CaptureError("STORAGE_FAILED", `IndexedDB put failed: ${msg}`, { cause: e as Error });
   } finally {
     try {
       db?.close();
     } catch {
       // ignore
     }
+  }
+}
+
+function isQuotaError(e: unknown): boolean {
+  if (!e || typeof e !== "object") return false;
+  if ((e as { name?: unknown }).name === "QuotaExceededError") return true;
+  // Some wrappers only preserve the message (e.g. Firefox NS_ERROR_DOM_QUOTA_REACHED).
+  const msg = e instanceof Error ? e.message : String(e);
+  return /quota/i.test(msg);
+}
+
+export async function putCapture(record: CaptureRecord): Promise<void> {
+  try {
+    await putOnce(record);
+    return;
+  } catch (e) {
+    if (!isQuotaError(e)) {
+      const msg = e instanceof Error ? e.message : String(e);
+      throw new CaptureError("STORAGE_FAILED", `IndexedDB put failed: ${msg}`, { cause: e as Error });
+    }
+  }
+  // Quota exceeded: evict the single oldest capture, then retry the put once.
+  let evicted = false;
+  try {
+    const all = await listCaptures(1000);
+    const oldest = all[all.length - 1];
+    if (oldest && oldest.id !== record.id) {
+      await deleteCapture(oldest.id);
+      evicted = true;
+    }
+  } catch {
+    // ignore eviction failures — the retry below reports honestly
+  }
+  try {
+    await putOnce(record);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new CaptureError(
+      "STORAGE_FAILED",
+      evicted
+        ? `Storage is full — removed the oldest capture and retried, but the save still failed (${msg}). Free disk space or delete old captures from the Workspace.`
+        : `Storage is full and no old capture could be evicted (${msg}). Free disk space or delete old captures from the Workspace.`,
+      { cause: e as Error }
+    );
   }
 }
 
@@ -153,16 +194,16 @@ export async function listCaptures(limit = 100): Promise<CaptureRecord[]> {  let
   }
 }
 
-export function dataUrlToBlob(dataUrl: string): Blob {
-  const match = dataUrl.match(/^data:([^;]+);base64,(.*)$/);
-  if (!match) throw new Error("Invalid data URL");
-  const mime = match[1] ?? "image/png";
-  const b64 = match[2] ?? "";
-  const binary = atob(b64);
-  const len = binary.length;
-  const bytes = new Uint8Array(len);
-  for (let i = 0; i < len; i++) bytes[i] = binary.charCodeAt(i);
-  return new Blob([bytes], { type: mime ?? "image/png" });
+export async function dataUrlToBlob(dataUrl: string): Promise<Blob> {
+  if (typeof dataUrl !== "string" || !dataUrl.startsWith("data:")) throw new Error("Invalid data URL");
+  let res: Response;
+  try {
+    res = await fetch(dataUrl);
+  } catch (e) {
+    throw new Error(`Invalid data URL: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!res.ok) throw new Error("Invalid data URL");
+  return await res.blob();
 }
 
 export async function blobToDataUrl(blob: Blob): Promise<string> {

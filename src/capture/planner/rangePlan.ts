@@ -2,7 +2,7 @@
  * Range position planner (plan: capture/planner/rangePlan.ts).
  */
 import { CaptureError } from "@/types/capture";
-import { MAX_POSITIONS, maxSafeStep, resolveStep } from "./adaptiveStep";
+import { MAX_POSITIONS, resolveStep } from "./adaptiveStep";
 
 export function planRangePositions(
   startY: number,
@@ -28,7 +28,8 @@ export function planRangePositions(
   const required = Math.ceil(rangeHeight / step) + 1;
   if (required > maxPositions) {
     const adaptiveStep = Math.ceil(rangeHeight / (maxPositions - 1));
-    if (adaptiveStep <= maxSafeStep(viewportHeight)) {
+    // Same occlusion-safe rule as full-page: oversized steps drop seam rows.
+    if (adaptiveStep <= resolveStep(viewportHeight, occludedTopHeight, occludedBottomHeight)) {
       step = adaptiveStep;
     } else {
       throw new CaptureError(
@@ -68,23 +69,22 @@ export function planRangePositions(
  * Convert a viewport-relative selection box + per-gesture scroll readings
  * into stitch target rows.
  *
- * Frame invariant (do NOT "correct" with container rect offsets): the loop
- * scrolls the container to absolute s and each chunk bitmap row r shows
- * container row s + (r − Rt), where Rt is the container's viewport offset.
- * The stitcher samples bitmap row (T − s) for target T, i.e. it shows
- * container row (T − Rt). The selected content at box row b is container row
- * (S + b − Rt). Setting T = S + b makes those equal — the −Rt terms cancel
- * because selection and stitching share one frame. Subtracting rect offsets
- * here double-counts and shifts output by exactly that offset (left-extra /
- * right-cropped horizontally, shifted-up vertically on nested pages).
+ * Frame model (explicit, no cancellation tricks): targets are TRUE scroller-
+ * content rows. Viewport row b at scroll S shows content row S + (b − Rt),
+ * where Rt is the scroller's viewport offset at selection time — so pass it
+ * in and it is subtracted here. The stitcher maps targets back through the
+ * PER-CHUNK rect (see projectSlice), which stays correct even if the page
+ * scrolled between selection and capture. rectTopAtSelection defaults to 0
+ * (window scroller) for backward compatibility.
  */
 export function selectionRangeToTargets(
   boxTop: number,
   boxHeight: number,
   startScrollTop: number,
-  endScrollTop: number
+  endScrollTop: number,
+  rectTopAtSelection = 0
 ): { startY: number; endY: number } {
-  const top = Math.min(startScrollTop, endScrollTop) + boxTop;
-  const bottom = Math.max(startScrollTop, endScrollTop) + boxTop + boxHeight;
+  const top = Math.min(startScrollTop, endScrollTop) + boxTop - rectTopAtSelection;
+  const bottom = Math.max(startScrollTop, endScrollTop) + boxTop + boxHeight - rectTopAtSelection;
   return { startY: top, endY: bottom };
 }

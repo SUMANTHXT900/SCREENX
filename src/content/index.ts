@@ -114,7 +114,25 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
             // Always resolves: scrollToAndSettle reports the ACTUAL position
             // and the stitcher pixel-aligns seams (align-and-continue).
             const r = await scrollToAndSettle(getActiveScrollController(), Number(x) || 0, Number(y) || 0);
-            sendResponse({ ok: true, ...r });
+            // Viewport-space frame: report the scroller's viewport rect measured
+            // AFTER the settle (rects move as the page scrolls — the stitcher
+            // needs this chunk's rect, never a cached one). Window → 0,0.
+            let rectLeft = 0;
+            let rectTop = 0;
+            try {
+              const active = getActiveScrollController();
+              const el = active?.element;
+              if (el && el !== window && el instanceof HTMLElement) {
+                const rect = el.getBoundingClientRect();
+                if (Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
+                  rectLeft = rect.left;
+                  rectTop = rect.top;
+                }
+              }
+            } catch {
+              // ignore — rect defaults (window frame) apply
+            }
+            sendResponse({ ok: true, ...r, rectLeft, rectTop, vw: window.innerWidth, vh: window.innerHeight });
             break;
           }
           case "SCREENX_RESTORE_CAPTURE": {
@@ -227,8 +245,15 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
               break;
             }
             try {
+             // Sync base64 decode (dataUrlToBlob) — never fetch(dataUrl):
+             // strict connect-src CSP blocks fetch on sites like GitHub.
               const blob = dataUrlToBlob(dlDataUrl);
               const blobUrl = URL.createObjectURL(blob);
+              if (!document.body) {
+                URL.revokeObjectURL(blobUrl);
+                sendResponse({ ok: false, error: "no-document-body" });
+                break;
+              }
               const a = document.createElement("a");
               a.href = blobUrl;
               a.download = dlFilename || "screenx-capture.png";

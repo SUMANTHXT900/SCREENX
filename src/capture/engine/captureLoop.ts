@@ -11,7 +11,7 @@ import { checkAdvance, type CaptureLoopOptions, type CaptureLoopResult } from ".
 const CONTENT_TIMEOUT_MS = 3500;
 const CAPTURE_TIMEOUT_MS = 6000;
 /** Settle tolerance (CSS px): readings this close to a requested origin count as the origin. */
-export const ORIGIN_SNAP_PX = 2;
+export const ORIGIN_SNAP_PX = 4;
 
 /**
  * Snap near-origin readings to the origin. The stitcher keeps the top rows
@@ -58,6 +58,9 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
   // stitcher dedupes overlap and warns about real gaps.
   let stuckStreak = 0;
   let stoppedEarly = false;
+  // Viewport geometry anchor (first chunk wins; later chunks must match).
+  let baseVw: number | undefined;
+  let baseVh: number | undefined;
 
   for (let i = 0; i < positions.length; i++) {
     const requestedY = positions[i]!;
@@ -94,7 +97,18 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
 
     const tScrollStart = performance.now();
     const scrollRes = await withTimeout(
-      sendToContent<{ ok: boolean; actualX?: number; actualY?: number; error?: string }>(
+      sendToContent<{
+        ok: boolean;
+        actualX?: number;
+        actualY?: number;
+        /** Scroller viewport offset post-settle (0,0 for window). */
+        rectLeft?: number;
+        rectTop?: number;
+        /** Viewport dims post-settle (mid-run change detection). */
+        vw?: number;
+        vh?: number;
+        error?: string;
+      }>(
         tabId,
         { type: "SCREENX_SCROLL_TO", x: 0, y: requestedY },
         CONTENT_TIMEOUT_MS
@@ -128,6 +142,25 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
 
     const actualY = scrollRes.actualY ?? requestedY;
     const actualX = scrollRes.actualX ?? 0;
+    // Viewport-geometry change mid-run (resize, monitor move, zoom) shifts
+    // every later strip's scale — fail loudly instead of seaming garbage.
+    // First chunk anchors the geometry every other chunk must match.
+    const vw = scrollRes.vw;
+    const vh = scrollRes.vh;
+    if (typeof vw === "number" && typeof vh === "number" && vw > 0 && vh > 0) {
+      if (baseVw === undefined || baseVh === undefined) {
+        baseVw = vw;
+        baseVh = vh;
+      } else if (vw !== baseVw || vh !== baseVh) {
+        throw new CaptureError(
+          "CAPTURE_FAILED",
+          `Viewport changed mid-capture (${baseVw}x${baseVh} -> ${vw}x${vh}). Keep the window still and try again.`
+        );
+      }
+    }
+    // Scroller viewport offset for this chunk (stitcher frame mapping).
+    const rectLeft = typeof scrollRes.rectLeft === "number" ? scrollRes.rectLeft : 0;
+    const rectTop = typeof scrollRes.rectTop === "number" ? scrollRes.rectTop : 0;
     // Snap near-origin readings so a top-anchored chunk hits the stitcher's
     // keep-top path exactly (see snapChunkCoord).
     const recordY = snapChunkCoord(requestedY, actualY);
@@ -199,13 +232,7 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     );
     perfCapture += performance.now() - tCaptureStart;
 
-    if (mode === "selected-area") {
-          // ignore
-    }
- else {
-          // ignore
- }
-    chunks.push({ dataUrl, x: recordX, y: recordY });
+    chunks.push({ dataUrl, x: recordX, y: recordY, rx: rectLeft, ry: rectTop });
 
     sendProgress(tabId, {
       mode,

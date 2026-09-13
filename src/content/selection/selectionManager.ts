@@ -234,6 +234,24 @@ export async function triggerCapture(): Promise<void> {
     // keep last reading
   }
   const api = scrollApi();
+  // Explicit frame: record the scroll container's viewport rect NOW so the
+  // worker converts the box to TRUE content rows/cols (see
+  // selectionRangeToTargets). The stitcher maps back through the per-chunk
+  // rect — no cross-phase cancellation to go stale. Window scroller → 0,0.
+  let containerRectTop = 0;
+  let containerRectLeft = 0;
+  try {
+    const el = selectionState.scrollTarget?.element;
+    if (el && el !== window && el instanceof HTMLElement) {
+      const r = el.getBoundingClientRect();
+      if (Number.isFinite(r.top) && Number.isFinite(r.left)) {
+        containerRectTop = r.top;
+        containerRectLeft = r.left;
+      }
+    }
+  } catch {
+    // ignore — rect defaults (window frame) apply
+  }
   const selection = {
     boxLeft: Math.round(clamped.left),
     boxTop: Math.round(clamped.top),
@@ -241,11 +259,13 @@ export async function triggerCapture(): Promise<void> {
     boxHeight: Math.round(clamped.height),
     startScrollTop: Math.round(selectionState.startScrollTop),
     endScrollTop: Math.round(selectionState.endScrollTop),
-    // Document X: the loop pins horizontal scroll to 0 every strip, and the
-    // stitcher samples bitmap column (targetX − 0) showing container column
-    // (targetX − Rl); wanting release column (scrollLeft + boxLeft − Rl) gives
-    // targetX = boxLeft + scrollLeft. No rect term (see selectionRangeToTargets).
-    x: Math.round(clamped.left + api.getLeft()),
+    containerRectTop: Math.round(containerRectTop),
+    containerRectLeft: Math.round(containerRectLeft),
+    // Document X in TRUE content columns: release column (scrollLeft +
+    // boxLeft − rectLeft). The loop re-scrolls to absolute positions and the
+    // stitcher samples through the per-chunk rect — explicit, no shared-frame
+    // cancellation.
+    x: Math.round(clamped.left + api.getLeft() - containerRectLeft),
     width: Math.round(clamped.width),
   };
 

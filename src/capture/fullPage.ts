@@ -141,6 +141,16 @@ export async function captureFullPage(): Promise<CaptureResult> {
 
     const chunks = loopResult.chunks;
 
+    // Unscrollable-but-tall trap: maxScrollY 0 with content taller than the
+    // viewport (overflow-hidden containers) collapses to one chunk that the
+    // stitcher would silently return as a "full page". Fail honestly instead.
+    if (chunks.length === 1 && totalHeight > viewportHeight + 2 && metrics.maxScrollY === 0) {
+      throw new CaptureError(
+        "CAPTURE_FAILED",
+        "This page's content doesn't scroll normally (fixed-height container). Try a selected-area capture instead."
+      );
+    }
+
     sendProgress(tab.id, {
       mode: "full-page",
       stage: "Stitching...",

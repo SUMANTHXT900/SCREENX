@@ -4,7 +4,7 @@
  */
 import type { PendingCapture } from "@/types/storage";
 import { CaptureError } from "@/types/capture";
-import { dataUrlToBlob, deleteCapture, getCapture, putCapture } from "../idb";
+import { dataUrlToBlob, deleteCapture, getCapture, listCaptures, putCapture } from "../idb";
 
 const PREFIX = "screenx:pending:";
 
@@ -50,7 +50,7 @@ export async function storePendingCapture(capture: PendingCapture): Promise<void
     blob = capture.blob;
   } else {
     try {
-      blob = dataUrlToBlob(capture.dataUrl);
+      blob = await dataUrlToBlob(capture.dataUrl);
     } catch (e) {
       throw new CaptureError("STORAGE_FAILED", `Failed to convert screenshot to Blob: ${e instanceof Error ? e.message : String(e)}`, {
         cause: e as Error,
@@ -186,7 +186,17 @@ export async function getLatestPendingCapture(): Promise<PendingCapture | null> 
     }
   }
 
-  if (!latestId) return null;
+  if (!latestId) {
+    // Service-worker restarts can wipe chrome.storage.session pointers while
+    // IndexedDB records survive — fall back to the most-recent capture.
+    try {
+      const recent = await listCaptures(1);
+      if (recent[0]) return await loadFromIdb(recent[0].id);
+    } catch {
+      // ignore — report absence below
+    }
+    return null;
+  }
   return await loadFromIdb(latestId);
 }
 

@@ -14,8 +14,17 @@ export type { RangeSelection } from "@/messaging/events";
 
 export interface StitchChunk {
   dataUrl: string;
+  /** Scroll position in CSS px (top-left of viewport content). */
   x: number;
   y: number;
+  /**
+   * Scroller viewport offset in CSS px, measured AFTER this chunk's scroll
+   * settled (0,0 for the window scroller). Viewport-space bitmaps need it:
+   * content column L sits at viewport x = rx + (L − scrollLeft). Missing it
+   * samples every strip too far left on nested scrollers (sliced left edge).
+   */
+  rx?: number;
+  ry?: number;
 }
 
 export interface StitchOutput {
@@ -197,7 +206,7 @@ export class CanvasStitcher implements Stitcher {
       const typeStr = this.isFullPage ? "Stitched image" : "Selected area";
       throw new CaptureError(
         "PAGE_TOO_LARGE",
-        `${typeStr} ${finalWidth}\u00d7${finalHeight} (${Math.round((finalWidth * finalHeight) / 1_000_000)} MP) exceeds browser canvas limits (max 65,535px height, ${MAX_CANVAS_PIXELS / 1_000_000} MP area).`
+        `${typeStr} ${finalWidth}\u00d7${finalHeight} (${Math.round((finalWidth * finalHeight) / 1_000_000)} MP) exceeds browser canvas limits (max ${MAX_CANVAS_WIDTH}px wide, ${MAX_CANVAS_HEIGHT}px tall, ${MAX_CANVAS_PIXELS / 1_000_000} MP area). Try a smaller range.`
       );
     }
   }
@@ -329,7 +338,9 @@ export class CanvasStitcher implements Stitcher {
     let coveredDocY = this.targetY;
     const targetEndY = this.targetY + this.targetHeight;
     // Pixel-drift carried across seams: each alignment correction shifts all
-    // later strips, instead of being rediscovered at every seam.
+    // later strips, instead of being rediscovered at every seam. Clamped to
+    // ±ALIGN_SEARCH — one false match on repeating content (tables, code)
+    // must not displace the entire rest of the page.
     let drift = 0;
 
     for (let i = 0; i < this.chunks.length; i++) {
@@ -338,9 +349,20 @@ export class CanvasStitcher implements Stitcher {
       const vpY = chunk.y;
       const vpW = this.viewportWidth;
       const vpH = this.viewportHeight;
+      // Scroller viewport offset for THIS chunk (0,0 for window). Rects move
+      // as the page scrolls, so a cached/global rect would mis-sample strips.
+      const rectLeft = chunk.rx ?? 0;
+      const rectTop = chunk.ry ?? 0;
+      const isLastChunk = i === this.chunks.length - 1;
 
       const safeTop = (vpY === 0) ? vpY : vpY + this.occludedTopHeight;
-      const safeBottom = vpY + vpH - this.occludedBottomHeight;
+      // Final chunk: extend to the target end instead of trimming the bottom
+      // occlusion. Those rows are photographed in no other chunk — trimming
+      // them leaves a permanent white tail exactly occludedBottomHeight tall.
+      // (A fixed bottom bar may show at the very end; a gap is worse.)
+      const safeBottom = isLastChunk
+        ? Math.min(vpY + vpH, targetEndY)
+        : vpY + vpH - this.occludedBottomHeight;
 
       const sliceDocTop = Math.max(safeTop, coveredDocY, this.targetY);
       const sliceDocBottom = Math.min(safeBottom, targetEndY);
@@ -360,27 +382,28 @@ export class CanvasStitcher implements Stitcher {
           continue;
         }
 
-        const globalLeft = Math.round(sliceDocLeft * scaleX);
-        const globalRight = Math.round(sliceDocRight * scaleX);
-        const globalTop = Math.round(sliceDocTop * scaleY);
-        const globalBottom = Math.round(sliceDocBottom * scaleY);
+        const globalLeft = Math.round((rectLeft + sliceDocLeft) * scaleX);
+        const globalRight = Math.round((rectLeft + sliceDocRight) * scaleX);
+        const globalTop = Math.round((rectTop + sliceDocTop) * scaleY);
+        const globalBottom = Math.round((rectTop + sliceDocBottom) * scaleY);
 
-        const globalVpX = Math.round(vpX * scaleX);
-        const globalVpY = Math.round(vpY * scaleY);
-        const globalSelX = Math.round(this.targetX * scaleX);
-        const globalSelY = Math.round(this.targetY * scaleY);
+        const globalVpX = Math.round((rectLeft + vpX) * scaleX);
+        const globalVpY = Math.round((rectTop + vpY) * scaleY);
 
         const srcX = Math.max(0, globalLeft - globalVpX);
         const srcY = Math.max(0, globalTop - globalVpY);
         const srcW = Math.min(bmp.width - srcX, globalRight - globalLeft);
         const srcH = Math.min(bmp.height - srcY, globalBottom - globalTop);
 
-        const dstX = globalLeft - globalSelX;
+        // Destination relative to the target origin (not differenced rounded
+        // absolutes) so spans always match the canvas at fractional DPR.
+        const dstX = Math.round((sliceDocLeft - this.targetX) * scaleX);
         const dstW = srcW;
         const dstH = srcH;
         // Scroll math predicts dstY; the page may have shifted, so verify
         // against actual pixels (first strip is trusted as the anchor).
-        let dstY = globalTop - globalSelY + drift;
+        // dstY is target-relative (matches the canvas exactly at any DPR).
+        let dstY = Math.round((sliceDocTop - this.targetY) * scaleY) + drift;
         if (i > 0) {
           const aligned = alignSliceToCanvas(
             ctx as unknown as CanvasRenderingContext2D,
@@ -396,6 +419,10 @@ export class CanvasStitcher implements Stitcher {
           );
           if (aligned !== dstY) {
             drift += aligned - dstY;
+            // One false match on repeating content must not displace the rest
+            // of the page: clamp the carried correction to the search window.
+            if (drift > ALIGN_SEARCH) drift = ALIGN_SEARCH;
+            else if (drift < -ALIGN_SEARCH) drift = -ALIGN_SEARCH;
             dstY = aligned;
           }
         }

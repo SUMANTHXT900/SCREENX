@@ -21,13 +21,27 @@ export async function scrollToAndSettle(
 ): Promise<ScrollResult> {
   const c = controller ?? getScrollController();
   const el = c.element;
+  // Scroll-snap must die for the whole run — including the WINDOW path:
+  // snap-section sites (Apple-style, fullpage.js) otherwise yank the scroll
+  // post-settle and every seam duplicates. documentElement carries the page's
+  // snap on the window path; restore both in a finally below.
   let originalScrollSnap = "";
   let originalOverflowAnchor = "";
-  if (el instanceof HTMLElement && el.style) {
-    originalScrollSnap = el.style.scrollSnapType;
-    originalOverflowAnchor = el.style.overflowAnchor;
-    el.style.scrollSnapType = "none";
-    el.style.overflowAnchor = "none";
+  let docSnap = "";
+  const docEl = typeof document !== "undefined" ? document.documentElement : null;
+  try {
+    if (el instanceof HTMLElement && el.style) {
+      originalScrollSnap = el.style.scrollSnapType;
+      originalOverflowAnchor = el.style.overflowAnchor;
+      el.style.scrollSnapType = "none";
+      el.style.overflowAnchor = "none";
+    }
+    if (docEl && el !== docEl) {
+      docSnap = docEl.style.scrollSnapType;
+      docEl.style.scrollSnapType = "none";
+    }
+  } catch {
+    // ignore — best effort
   }
 
   let attempts = 0;
@@ -38,41 +52,50 @@ export async function scrollToAndSettle(
   let maxScrollY = c.getMaxScrollY();
   const maxScrollX = c.getMaxScrollX();
 
-  while (attempts < maxAttempts) {
-    attempts++;
+  try {
+    while (attempts < maxAttempts) {
+      attempts++;
 
-    maxScrollY = c.getMaxScrollY();
-    const clampedMaxX = c.getMaxScrollX();
+      maxScrollY = c.getMaxScrollY();
+      const clampedMaxX = c.getMaxScrollX();
 
-    const clampedX = Math.max(0, Math.min(x, clampedMaxX));
-    const clampedY = Math.max(0, Math.min(y, maxScrollY));
+      const clampedX = Math.max(0, Math.min(x, clampedMaxX));
+      const clampedY = Math.max(0, Math.min(y, maxScrollY));
 
-    c.setScrollTop(clampedY);
-    c.setScrollLeft(clampedX);
+      c.setScrollTop(clampedY);
+      c.setScrollLeft(clampedX);
 
-    // Repaint, then a real settle pause (lazy images, fade-ins), then verify
-    // the container has actually stopped moving before trusting a reading.
-    await new Promise<void>((resolve) => {
-      requestAnimationFrame(() => {
+      // Repaint, then a real settle pause (lazy images, fade-ins), then verify
+      // the container has actually stopped moving before trusting a reading.
+      await new Promise<void>((resolve) => {
         requestAnimationFrame(() => {
-          setTimeout(resolve, 100 + attempts * 100);
+          requestAnimationFrame(() => {
+            setTimeout(resolve, 100 + attempts * 100);
+          });
         });
       });
-    });
-    await waitForStableScroll(c);
+      await waitForStableScroll(c);
 
-    actualX = c.getScrollLeft();
-    actualY = c.getScrollTop();
+      actualX = c.getScrollLeft();
+      actualY = c.getScrollTop();
 
-    if (Math.abs(actualX - clampedX) <= 2 && Math.abs(actualY - clampedY) <= 2) {
-      settled = true;
-      break;
+      if (Math.abs(actualX - clampedX) <= 2 && Math.abs(actualY - clampedY) <= 2) {
+        settled = true;
+        break;
+      }
     }
-  }
-
-  if (el instanceof HTMLElement && el.style) {
-    el.style.scrollSnapType = originalScrollSnap;
-    el.style.overflowAnchor = originalOverflowAnchor;
+  } finally {
+    // Restore even if getMaxScrollY throws mid-loop — leaving snap "none"
+    // would permanently break the page's scrolling.
+    try {
+      if (el instanceof HTMLElement && el.style) {
+        el.style.scrollSnapType = originalScrollSnap;
+        el.style.overflowAnchor = originalOverflowAnchor;
+      }
+      if (docEl && el !== docEl) docEl.style.scrollSnapType = docSnap;
+    } catch {
+      // ignore
+    }
   }
 
   if (!settled) {

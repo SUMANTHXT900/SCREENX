@@ -26,7 +26,22 @@ export function openDB(): Promise<IDBDatabase> {
           }
         }
       };
-      req.onsuccess = () => resolve(req.result);
+      req.onsuccess = () => {
+        const db = req.result;
+        // Don't block other contexts that need to upgrade: close our handle
+        // when a version change arrives, and note unexpected closes.
+        db.onversionchange = () => {
+          try {
+            db.close();
+          } catch {
+            // ignore
+          }
+        };
+        db.onclose = () => {
+          // Connection closed by the browser — next operation reopens it.
+        };
+        resolve(db);
+      };
       req.onerror = () => reject(req.error ?? new Error("IndexedDB open failed"));
       req.onblocked = () => reject(new Error("IndexedDB blocked"));
     } catch (e) {

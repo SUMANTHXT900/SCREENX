@@ -13,6 +13,8 @@ interface Props {
   fileName: string;
   onClose: () => void;
   onDownload: () => void;
+  /** Multi-part captures: offer per-part files when the flattened export can't fit. */
+  onDownloadParts?: (() => void) | null;
 }
 
 const FORMATS: { id: ExportFormat; label: string; hint: string }[] = [
@@ -21,7 +23,7 @@ const FORMATS: { id: ExportFormat; label: string; hint: string }[] = [
   { id: "webp", label: "WebP", hint: "modern" },
 ];
 
-export default function ExportModal({ open, busy, error, fileName, onClose, onDownload }: Props): React.JSX.Element | null {
+export default function ExportModal({ open, busy, error, fileName, onClose, onDownload, onDownloadParts }: Props): React.JSX.Element | null {
   const exportFormat = useSettingsStore((s) => s.exportFormat);
   const setExportFormat = useSettingsStore((s) => s.setExportFormat);
   const exportQuality = useSettingsStore((s) => s.exportQuality);
@@ -114,6 +116,16 @@ export default function ExportModal({ open, busy, error, fileName, onClose, onDo
         >
           <Download className="h-4 w-4" strokeWidth={2.5} /> {busy ? "Rendering…" : `Download ${exportFormat.toUpperCase()}`}
         </button>
+        {onDownloadParts && (
+          <button
+            type="button"
+            onClick={onDownloadParts}
+            disabled={busy}
+            className="mt-2 inline-flex w-full cursor-pointer items-center justify-center gap-1.5 border-2 border-black bg-white px-3 py-2 text-xs font-bold text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> Download parts individually
+          </button>
+        )}
       </div>
     </div>
   );

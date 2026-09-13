@@ -2,7 +2,7 @@
  * Full-page position planner (plan: capture/planner/fullPagePlan.ts).
  */
 import { CaptureError } from "@/types/capture";
-import { MAX_POSITIONS, maxSafeStep, resolveStep } from "./adaptiveStep";
+import { MAX_POSITIONS, resolveStep } from "./adaptiveStep";
 
 export function planFullPagePositions(
   totalHeight: number,
@@ -17,7 +17,11 @@ export function planFullPagePositions(
   const required = Math.ceil(totalHeight / step);
   if (required > maxPositions) {
     const adaptiveStep = Math.ceil(totalHeight / maxPositions);
-    if (adaptiveStep <= maxSafeStep(viewportHeight)) {
+    // The adaptive step must ALSO respect occlusions: a step larger than the
+    // occlusion-safe step silently drops (top + bottom − overlap) rows per
+    // seam. If even the safe step needs more chunks, fail loudly — a gappy
+    // stitch must never pass as success.
+    if (adaptiveStep <= resolveStep(viewportHeight, occludedTopHeight, occludedBottomHeight)) {
       step = adaptiveStep;
     } else {
       throw new CaptureError(

@@ -17,6 +17,14 @@ export interface SliceRect {
 /**
  * Project a document slice to physical source/destination rects.
  * Guarantees srcH === dstH (no interpolation blur) and gapless dstY abutment.
+ *
+ * Frame model (viewport-space bitmaps): captureVisibleTab photographs the
+ * window viewport, so bitmap pixel (bx,by) shows scroller-content row/col
+ *   content = scroll + (b/s − rect)
+ * where rect is the scroller's viewport offset (0 for the window scroller)
+ * and s is the measured bitmap scale. rectLeft/rectTop MUST be the rect
+ * measured after the chunk's scroll settled — rects move as the page scrolls,
+ * never cache them across chunks. Round only the final values, never inputs.
  */
 export function projectSlice(options: {
   sliceDocLeft: number;
@@ -27,6 +35,9 @@ export function projectSlice(options: {
   vpY: number;
   targetX: number;
   targetY: number;
+  /** Scroller viewport offset in CSS px (0 for window). Measured post-settle, per chunk. */
+  rectLeft?: number;
+  rectTop?: number;
   bmpWidth: number;
   bmpHeight: number;
   viewportWidth: number;
@@ -41,6 +52,8 @@ export function projectSlice(options: {
     vpY,
     targetX,
     targetY,
+    rectLeft = 0,
+    rectTop = 0,
     bmpWidth,
     bmpHeight,
     viewportWidth,
@@ -52,15 +65,16 @@ export function projectSlice(options: {
   const scaleX = bmpWidth / viewportWidth;
   const scaleY = bmpHeight / viewportHeight;
 
-  const globalLeft = Math.round(sliceDocLeft * scaleX);
-  const globalRight = Math.round(sliceDocRight * scaleX);
-  const globalTop = Math.round(sliceDocTop * scaleY);
-  const globalBottom = Math.round(sliceDocBottom * scaleY);
+  // Viewport-space mapping: content column L sits at viewport x = rectLeft +
+  // (L − scrollLeft). Omitting rectLeft samples every strip too far left on
+  // nested scrollers (left edge sliced off) — the offset is NOT optional.
+  const globalLeft = Math.round((rectLeft + sliceDocLeft) * scaleX);
+  const globalRight = Math.round((rectLeft + sliceDocRight) * scaleX);
+  const globalTop = Math.round((rectTop + sliceDocTop) * scaleY);
+  const globalBottom = Math.round((rectTop + sliceDocBottom) * scaleY);
 
-  const globalVpX = Math.round(vpX * scaleX);
-  const globalVpY = Math.round(vpY * scaleY);
-  const globalSelX = Math.round(targetX * scaleX);
-  const globalSelY = Math.round(targetY * scaleY);
+  const globalVpX = Math.round((rectLeft + vpX) * scaleX);
+  const globalVpY = Math.round((rectTop + vpY) * scaleY);
 
   const srcX = Math.max(0, globalLeft - globalVpX);
   const srcY = Math.max(0, globalTop - globalVpY);
@@ -69,8 +83,11 @@ export function projectSlice(options: {
 
   if (srcW <= 0 || srcH <= 0) return null;
 
-  const dstX = globalLeft - globalSelX;
-  const dstY = globalTop - globalSelY;
+  // Destination is computed RELATIVE to the target origin (not by differencing
+  // independently rounded absolutes): span round((end−start)·s) always equals
+  // the canvas span round(size·s), so no ±1px white/crop lines at fractional DPR.
+  const dstX = Math.round((sliceDocLeft - targetX) * scaleX);
+  const dstY = Math.round((sliceDocTop - targetY) * scaleY);
 
   return { srcX, srcY, srcW, srcH, dstX, dstY, dstW: srcW, dstH: srcH };
 }

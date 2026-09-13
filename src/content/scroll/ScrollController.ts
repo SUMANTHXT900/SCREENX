@@ -50,11 +50,15 @@ export function findElementScrollController(): ScrollController | null {
   let best: HTMLElement | null = null;
   let bestScore = 0;
   for (const el of candidates) {
+    // Cheap layout-only prefilter first: scrollHeight/clientHeight don't force
+    // a style recalc, getComputedStyle does. Skip the rect until overflow passes.
+    if (el.scrollHeight - el.clientHeight <= 100) continue;
+    if (el.clientHeight <= window.innerHeight * 0.4) continue;
     const style = getComputedStyle(el);
     const overflowY = style.overflowY;
     if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") continue;
     const scrollableHeight = el.scrollHeight - el.clientHeight;
-    if (scrollableHeight > 100 && el.clientHeight > window.innerHeight * 0.4) {
+    {
       const rect = el.getBoundingClientRect();
       if (rect.width > window.innerWidth * 0.6 && rect.height > window.innerHeight * 0.4) {
         if (scrollableHeight > bestScore) {
@@ -99,8 +103,13 @@ export function getScrollController(): ScrollController {
   const windowScrollable = windowScrollHeight - windowViewportHeight;
 
   const elementController = findElementScrollController();
-  if (elementController && windowScrollable < 100) {
-    return elementController;
+  if (elementController) {
+    // Drive the DOMINANT scroller: on dual-scroll pages (Notion, Gmail, Jira)
+    // scrolling the wrong element stalls every position and silently truncates
+    // the stitch. The old windowScrollable<100 gate ignored a huge inner pane
+    // whenever the window scrolled even slightly.
+    const elementRange = elementController.getMaxScrollY();
+    if (elementRange >= windowScrollable) return elementController;
   }
   return createWindowScrollController();
 }
