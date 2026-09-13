@@ -1,5 +1,5 @@
 import { CaptureError } from "@/types";
-import { captureVisibleTabThrottled } from "../client/tabCaptureClient";
+import { captureVisibleTabThrottled, waitThrottle } from "../client/tabCaptureClient";
 import { withTimeout } from "../captureUtils";
 import { sendProgress, sendToContent } from "../client/contentBridge";
 import type { StitchChunk } from "../stitch/canvasStitcher";
@@ -15,9 +15,9 @@ export const ORIGIN_SNAP_PX = 4;
 
 /**
  * Snap near-origin readings to the origin. The stitcher keeps the top rows
- * of a top-anchored (y≈0) chunk, so a reading of 1–2px would both trim real
- * top content AND skip the keep-top path — snapping keeps it exact while the
- * pixel aligner absorbs the ≤2px residue.
+ * of a top-anchored (y≈0) chunk, so a reading of a few px would both trim
+ * real top content AND skip the keep-top path — snapping keeps it exact
+ * while the pixel aligner absorbs the ≤4px residue.
  */
 export function snapChunkCoord(requested: number, actual: number): number {
   return requested === 0 && actual >= 0 && actual <= ORIGIN_SNAP_PX ? 0 : actual;
@@ -96,6 +96,11 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     }
 
     const tScrollStart = performance.now();
+    // Rate-limit wait happens BEFORE the scroll, not between the position
+    // read and the shot: the capture then fires immediately after measuring,
+    // so the page has no idle gap in which to drift (the number we stitch on
+    // is the freshest possible one).
+    await waitThrottle();
     const scrollRes = await withTimeout(
       sendToContent<{
         ok: boolean;
@@ -186,9 +191,6 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
       continue;
     }
 
-    if (mode === "selected-area") {
-          // ignore
-    }
     sendProgress(tabId, {
       mode,
       stage: "Capturing...",

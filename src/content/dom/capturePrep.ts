@@ -5,6 +5,7 @@
  */
 import { getScrollController, type ScrollController } from "./scrollController";
 import { removeProgressHud } from "../ui/progressHud";
+import { restoreStickyBars } from "./stickyHider";
 
 let originalX = 0;
 let originalY = 0;
@@ -97,6 +98,13 @@ export function resetCaptureState(): { ok: true } {
   }
   prepared = false;
   scrollController = null;
+  try {
+    // A previous run that died mid-pass (SW restart) may have left bars
+    // hidden — the watchdog usually catches it, this is the backstop.
+    restoreStickyBars();
+  } catch {
+    // ignore
+  }
   return { ok: true as const };
 }
 

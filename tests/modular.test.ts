@@ -1,6 +1,6 @@
 import { describe, test, expect } from "vitest";import { planFullPagePositions } from "../src/capture/planner/fullPagePlan";
 import { planRangePositions, selectionRangeToTargets } from "../src/capture/planner/rangePlan";
-import { calculateTotalTimeout } from "../src/capture/planner/adaptiveStep";
+import { calculateTotalTimeout, resolveStep, MIN_OVERLAP_PX } from "../src/capture/planner/adaptiveStep";
 import { computeFullPageOcclusion, computeRangeOcclusion } from "../src/capture/planner/occlusion";
 import {
   estimateMegapixels,
@@ -37,6 +37,20 @@ describe("unified planner entry points", () => {
   });
 });
 
+describe("capture overlap planning", () => {
+  test("retains alignment overlap instead of abutting strips", () => {
+    const step = resolveStep(800, 60, 40);
+    expect(800 - step).toBeGreaterThanOrEqual(MIN_OVERLAP_PX);
+    expect(800 - step).toBeGreaterThanOrEqual(60 + 40 + 20);
+    expect(planFullPagePositions(3000, 800, 2200, 300, 60, 40)).toEqual(
+      expect.arrayContaining([0, step])
+    );
+  });
+
+  test("rejects impossible occlusion geometry", () => {
+    expect(() => resolveStep(100, 60, 40)).toThrow(/entire viewport/);
+  });
+});
 describe("occlusion helpers", () => {
   test("full-page ignores narrow elements, clamps to 25%", () => {
     const els = [

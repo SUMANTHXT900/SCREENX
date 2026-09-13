@@ -199,7 +199,7 @@ describe("stitch regressions", () => {
     // Engine contract: the stitcher carries the correction across seams.
     const root = join(dirname(fileURLToPath(import.meta.url)), "..");
     const src = readFileSync(join(root, "src", "capture", "stitch", "canvasStitcher.ts"), "utf-8");
-    expect(src).toContain("drift += aligned - dstY");
+    expect(src).toContain("drift += aligned.y - dstY");
     expect(src).toContain("+ drift");
   });
 

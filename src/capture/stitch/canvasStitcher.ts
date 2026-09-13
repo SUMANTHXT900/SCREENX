@@ -6,7 +6,7 @@ import {
   MAX_CHUNKS,
   MAX_TOTAL_HEIGHT,
 } from "./limits";
-import { ALIGN_BAND, ALIGN_SEARCH, findBestAlignment } from "./coordinateMath";
+import { ALIGN_BAND, ALIGN_SEARCH, findBestAlignment, measureSeamFade } from "./coordinateMath";
 import type { RangeSelection } from "@/messaging/events";
 
 // RangeSelection is single-sourced in @/messaging/events; re-exported here for compat.
@@ -78,6 +78,34 @@ export function createStitcher(options: CanvasStitcherOptions): Stitcher {
 
 type Ctx2D = CanvasRenderingContext2D;
 
+/** Read bandH rows of a strip starting at (srcX, srcY) into plain pixels. Null on any failure. */
+function readStripBand(
+  bmp: ImageBitmap,
+  srcX: number,
+  srcY: number,
+  srcW: number,
+  bandH: number
+): { data: Uint8ClampedArray; width: number; height: number } | null {
+  try {
+    if (srcW <= 0 || bandH <= 0) return null;
+    const scratch = typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(srcW, bandH)
+      : (() => {
+          const el = document.createElement("canvas");
+          el.width = srcW;
+          el.height = bandH;
+          return el as unknown as OffscreenCanvas;
+        })();
+    const sctx = (scratch as OffscreenCanvas).getContext("2d") as unknown as Ctx2D | null;
+    if (!sctx) return null;
+    sctx.drawImage(bmp as unknown as CanvasImageSource, srcX, srcY, srcW, bandH, 0, 0, srcW, bandH);
+    const pixels = sctx.getImageData(0, 0, srcW, bandH);
+    return { data: pixels.data, width: srcW, height: bandH };
+  } catch {
+    return null;
+  }
+}
+
 /** 2d context with readback hint; null when unavailable (alignment is skipped). */
 function getReadableContext(canvas: OffscreenCanvas): Ctx2D | null {
   try {
@@ -96,8 +124,9 @@ function getReadableContext(canvas: OffscreenCanvas): Ctx2D | null {
 
 /**
  * Nudge a slice's destination Y so its top band matches the already-drawn
- * canvas. Returns the (possibly unchanged) Y. Never throws — any readback
- * failure falls back to scroll math.
+ * canvas. Returns { y, matched }: matched=false means the answer is scroll
+ * math (blank band or poor match), which adaptive-trim must not trust.
+ * Never throws — any readback failure falls back to scroll math.
  */
 function alignSliceToCanvas(
   ctx: Ctx2D,
@@ -110,26 +139,17 @@ function alignSliceToCanvas(
   expectedDstY: number,
   canvasWidth: number,
   canvasHeight: number
-): number {
+): { y: number; matched: boolean } {
   try {
-    if (srcW <= 0 || srcH <= 0) return expectedDstY;
+    if (srcW <= 0 || srcH <= 0) return { y: expectedDstY, matched: false };
     const bandH = Math.min(ALIGN_BAND, srcH);
-    const scratch = typeof OffscreenCanvas !== "undefined"
-      ? new OffscreenCanvas(srcW, bandH)
-      : (() => {
-          const el = document.createElement("canvas");
-          el.width = srcW;
-          el.height = bandH;
-          return el as unknown as OffscreenCanvas;
-        })();
-    const sctx = (scratch as OffscreenCanvas).getContext("2d") as unknown as Ctx2D | null;
-    if (!sctx) return expectedDstY;
-    sctx.drawImage(bmp as unknown as CanvasImageSource, srcX, srcY, srcW, bandH, 0, 0, srcW, bandH);
-    const bandPixels = sctx.getImageData(0, 0, srcW, bandH);
+    const band = readStripBand(bmp, srcX, srcY, srcW, bandH);
+    if (!band) return { y: expectedDstY, matched: false };
+    const bandPixels = { data: band.data, width: band.width, height: band.height };
 
     const regionTop = Math.max(0, expectedDstY - ALIGN_SEARCH);
     const regionBottom = Math.min(canvasHeight, expectedDstY + ALIGN_SEARCH + bandH);
-    if (regionBottom - regionTop < bandH || dstX + srcW > canvasWidth) return expectedDstY;
+    if (regionBottom - regionTop < bandH || dstX + srcW > canvasWidth) return { y: expectedDstY, matched: false };
     const regionPixels = ctx.getImageData(dstX, regionTop, srcW, regionBottom - regionTop);
 
     const found = findBestAlignment(
@@ -138,9 +158,9 @@ function alignSliceToCanvas(
       regionTop,
       expectedDstY
     );
-    return found.matched ? found.y : expectedDstY;
+    return found.matched ? { y: found.y, matched: true } : { y: expectedDstY, matched: false };
   } catch {
-    return expectedDstY;
+    return { y: expectedDstY, matched: false };
   }
 }
 
@@ -342,6 +362,16 @@ export class CanvasStitcher implements Stitcher {
     // ±ALIGN_SEARCH — one false match on repeating content (tables, code)
     // must not displace the entire rest of the page.
     let drift = 0;
+    // Adaptive fade trim: the first MATCHED seam measures the page's real
+    // edge-fade depth and shrinks later strips' trims to fit (only ever
+    // shrinks — a cautious fixed guess deletes live rows on pages that fade
+    // nothing). Until measured, the planner's occlusion trims apply.
+    let effOccTop = this.occludedTopHeight;
+    let effOccBottom = this.occludedBottomHeight;
+    let adaptiveMeasured = false;
+    // Previous strip's drawn span (canvas-local), for the fade measurement.
+    let prevDstY = 0;
+    let prevDrawH = 0;
 
     for (let i = 0; i < this.chunks.length; i++) {
       const chunk = this.chunks[i]!;
@@ -355,16 +385,20 @@ export class CanvasStitcher implements Stitcher {
       const rectTop = chunk.ry ?? 0;
       const isLastChunk = i === this.chunks.length - 1;
 
-      const safeTop = (vpY === 0) ? vpY : vpY + this.occludedTopHeight;
+      const safeTop = (vpY === 0) ? vpY : vpY + effOccTop;
       // Final chunk: extend to the target end instead of trimming the bottom
       // occlusion. Those rows are photographed in no other chunk — trimming
       // them leaves a permanent white tail exactly occludedBottomHeight tall.
       // (A fixed bottom bar may show at the very end; a gap is worse.)
       const safeBottom = isLastChunk
         ? Math.min(vpY + vpH, targetEndY)
-        : vpY + vpH - this.occludedBottomHeight;
+        : vpY + vpH - effOccBottom;
 
-      const sliceDocTop = Math.max(safeTop, coveredDocY, this.targetY);
+      // Retain the deliberate viewport overlap for pixel alignment. The
+      // previous implementation used coveredDocY as the new top, which
+      // discarded the overlap before the aligner could inspect it; that made
+      // fractional-DPR/layout drift impossible to correct and created seams.
+      const sliceDocTop = Math.max(safeTop, this.targetY);
       const sliceDocBottom = Math.min(safeBottom, targetEndY);
 
       if (sliceDocBottom <= sliceDocTop) continue;
@@ -404,6 +438,7 @@ export class CanvasStitcher implements Stitcher {
         // against actual pixels (first strip is trusted as the anchor).
         // dstY is target-relative (matches the canvas exactly at any DPR).
         let dstY = Math.round((sliceDocTop - this.targetY) * scaleY) + drift;
+        let stripMatched = false;
         if (i > 0) {
           const aligned = alignSliceToCanvas(
             ctx as unknown as CanvasRenderingContext2D,
@@ -417,16 +452,56 @@ export class CanvasStitcher implements Stitcher {
             finalWidth,
             finalHeight
           );
-          if (aligned !== dstY) {
-            drift += aligned - dstY;
+          stripMatched = aligned.matched;
+          if (aligned.y !== dstY) {
+            drift += aligned.y - dstY;
             // One false match on repeating content must not displace the rest
             // of the page: clamp the carried correction to the search window.
             if (drift > ALIGN_SEARCH) drift = ALIGN_SEARCH;
             else if (drift < -ALIGN_SEARCH) drift = -ALIGN_SEARCH;
-            dstY = aligned;
+            dstY = aligned.y;
           }
         }
         dstY = Math.max(0, Math.min(dstY, Math.max(0, finalHeight - dstH)));
+
+        // Measure BEFORE drawing the new strip. Once drawImage overwrites the
+        // overlap, the canvas no longer contains the crisp previous copy and
+        // every fade would incorrectly measure as zero.
+        if (i === 1 && stripMatched && !adaptiveMeasured && prevDrawH > 0) {
+          try {
+            const prevBottom = prevDstY + prevDrawH;
+            const probePx = Math.max(8, Math.min(96, Math.floor(Math.min(srcH, prevDrawH) / 4)));
+            const head = readStripBand(bmp, srcX, srcY, srcW, probePx);
+            const regionTop = Math.max(0, Math.min(dstY, prevBottom - probePx));
+            const regionBottom = Math.min(finalHeight, Math.max(dstY + probePx, prevBottom));
+            if (head && regionBottom - regionTop >= probePx) {
+              const regionPixels = (ctx as unknown as CanvasRenderingContext2D).getImageData(
+                dstX, regionTop, srcW, regionBottom - regionTop
+              );
+              const fades = measureSeamFade(
+                { data: head.data, width: head.width, height: head.height },
+                { data: regionPixels.data, width: srcW, height: regionBottom - regionTop },
+                regionTop,
+                dstY,
+                prevDstY,
+                prevBottom,
+                probePx
+              );
+              if (fades) {
+                // Shrink-only, with a spare-rows margin; CSS-px for the trims.
+                effOccTop = Math.min(effOccTop, fades.top / scaleY + 6);
+                effOccBottom = Math.min(effOccBottom, fades.bottom / scaleY + 6);
+                console.debug(
+                  "[ScreenX] measured page fade",
+                  JSON.stringify({ topPx: fades.top, bottomPx: fades.bottom, trimTop: effOccTop, trimBottom: effOccBottom })
+                );
+              }
+            }
+          } catch {
+            // ignore — measurement is opportunistic; cautious trims stand
+          }
+          adaptiveMeasured = true;
+        }
 
         (ctx as unknown as CanvasRenderingContext2D).drawImage(
           bmp as unknown as CanvasImageSource,
@@ -440,7 +515,10 @@ export class CanvasStitcher implements Stitcher {
           dstH
         );
 
-        coveredDocY = sliceDocBottom;
+        prevDstY = dstY;
+        prevDrawH = dstH;
+
+        coveredDocY = Math.max(coveredDocY, sliceDocBottom);
       } catch (e) {
         try {
           bmp?.close();
@@ -455,8 +533,10 @@ export class CanvasStitcher implements Stitcher {
       await new Promise<void>((r) => setTimeout(r, 0));
     }
 
-    if (!this.isFullPage && coveredDocY < targetEndY - 2) {
-      console.warn("[ScreenX][SelectedArea] Stitch warning: coveredDocY did not fully reach selEndY", JSON.stringify({ coveredDocY, selEndY: targetEndY, gap: targetEndY - coveredDocY }));
+    if (coveredDocY < targetEndY - 2) {
+      const gap = targetEndY - coveredDocY;
+      const label = this.isFullPage ? "[ScreenX] Stitch warning: coveredDocY did not reach page end" : "[ScreenX][SelectedArea] Stitch warning: coveredDocY did not fully reach selEndY";
+      console.warn(label, JSON.stringify(this.isFullPage ? { coveredDocY, pageEndY: targetEndY, gap } : { coveredDocY, selEndY: targetEndY, gap }));
     }
 
     try {

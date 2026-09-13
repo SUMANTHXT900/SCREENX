@@ -10,6 +10,7 @@ import { ensureContentScript } from "./client/ensureContent";
 import { sendProgress, sendToContent } from "./client/contentBridge";
 import { sendToast } from "@/messaging/client";
 import { executeCaptureLoop } from "./engine/captureLoop";
+import { hideStickyBarsForCapture } from "./client/stickyBars";
 import { globalSession } from "./engine/CaptureSession";
 import { acquireGlobalLock, heartbeatGlobalLock, releaseGlobalLock } from "./engine/globalLock";
 import {
@@ -287,6 +288,7 @@ export async function stitchSelectedRange(
 export async function captureSelectedArea(): Promise<CaptureResult> {
   let tab: chrome.tabs.Tab | null = null;
   let prepared = false;
+  let stickyHidden = false;
   let lockToken: string | null = null;
   // Ownership flag: the selection wait below holds NO locks, so a superseded
   // run unwinds through finally without touching a successor's locks.
@@ -414,8 +416,8 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     );
     // Constant-HUD contract: see fullPage.ts — surviving trim is whichever is
     // larger (real bars or the always-visible HUD).
-    const occludedTopHeight = Math.max(occlusion.top, HUD_RESERVE_PX);
-    const occludedBottomHeight = occlusion.bottom;
+    let occludedTopHeight = Math.max(occlusion.top, HUD_RESERVE_PX);
+    let occludedBottomHeight = occlusion.bottom;
 
     if (metrics.controllerType && metrics.controllerType !== "window") {
       console.warn("[ScreenX][SelectedArea] nested controller detected", JSON.stringify(metrics));
@@ -424,9 +426,21 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     await withTimeout(sendToContent<{ ok: true }>(tab.id, { type: "SCREENX_PREPARE_CAPTURE" }), CONTENT_TIMEOUT_MS, "Prepare");
     prepared = true;
 
-    // NOTE: nothing on the page is hidden or modified for capture (beyond the
-    // animation-freeze stylesheet). Fixed/sticky bars are handled purely by
-    // occlusion-aware overlap in the planner + stitcher.
+    // Multi-strip passes hide fixed/sticky bars overlapping the selection
+    // band instead of trimming them (see fullPage.ts — same rationale).
+    // Single-shot captures skip hiding so the shot looks like the screen.
+    if (endY - startY > viewportHeight) {
+      const hide = await hideStickyBarsForCapture(
+        tab.id,
+        normalizedSelection.x,
+        normalizedSelection.x + normalizedSelection.width
+      );
+      stickyHidden = hide.active;
+      if (hide.active) {
+        occludedTopHeight = HUD_RESERVE_PX;
+        occludedBottomHeight = 0;
+      }
+    }
 
     const positions = planRangePositions(startY, endY, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
 
@@ -460,6 +474,14 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     });
 
     chunks.push(...loopResult.chunks);
+    let captureEndY = endY;
+    if (loopResult.stoppedEarly && chunks.length > 0) {
+      // Avoid a white tail when a virtualized/collapsing scroller stops before
+      // the stale selection end. The final settled viewport bounds the usable
+      // target; preserve at least one pixel of the selected range.
+      captureEndY = Math.min(endY, Math.max(startY + 1, chunks[chunks.length - 1]!.y + viewportHeight));
+      console.warn("[ScreenX][SelectedArea] exporting settled partial range", JSON.stringify({ requestedEndY: endY, captureEndY }));
+    }
 
     sendProgress(tab.id, {
       mode: "selected-area",
@@ -470,7 +492,7 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     });
 
     // Over-tall ranges auto-split into canvas-safe parts stitched from the same chunks.
-    const segments = planSegments(normalizedSelection.width, startY, endY, dpr);
+    const segments = planSegments(normalizedSelection.width, startY, captureEndY, dpr);
     const groupId = segments.length > 1 ? crypto.randomUUID() : undefined;
 
     const parts: CaptureResult[] = [];
@@ -553,7 +575,7 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     // sessionHeld: a superseded selection wait owns nothing — releasing
     // unconditionally here would clear a SUCCESSOR's live lock.
     try {
-      await finalizeCapture(tab?.id, prepared);
+      await finalizeCapture(tab?.id, prepared, stickyHidden);
     } finally {
       try {
         if (lockToken) await releaseGlobalLock(lockToken);

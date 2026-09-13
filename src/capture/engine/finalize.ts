@@ -8,6 +8,7 @@ import { storePendingCapture } from "@/storage/captureHandoff";
 import { deleteCapture } from "@/storage/idb";
 import { sendToast, sendToastToTab, hideProgressHud, restoreCapture, clearCaptureBadge } from "@/messaging/client";
 import { notifyErrorFallback } from "@/background/handlers/commandHandler";
+import { restoreStickyBarsForCapture } from "../client/stickyBars";
 // Static import — deliberately NOT dynamic: Vite wraps dynamic import() in
 // __vitePreload, whose DOM calls (document/window) throw inside the service
 // worker and mask the real outcome. This module is ~1KB; lazy-loading it
@@ -84,10 +85,21 @@ export function toCaptureError(e: unknown, fallback = "Capture failed."): Captur
 }
 
 /** Best-effort HUD hide + scroll restore (call from finally blocks). */
-export async function finalizeCapture(tabId: number | undefined, prepared: boolean): Promise<void> {
+export async function finalizeCapture(
+  tabId: number | undefined,
+  prepared: boolean,
+  restoreSticky = false
+): Promise<void> {
   clearCaptureBadge();
   if (tabId === undefined) return;
   await hideProgressHud(tabId);
+  if (restoreSticky) {
+    try {
+      await restoreStickyBarsForCapture(tabId);
+    } catch {
+      // ignore — content-side watchdog + reset entry are the backstops
+    }
+  }
   if (prepared) {
     try {
       await restoreCapture(tabId);

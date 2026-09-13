@@ -178,3 +178,93 @@ export function findBestAlignment(
   if (bestError > ALIGN_MAX_ERROR) return { y: expectedY, error: bestError, matched: false };
   return { y: bestY, error: bestError, matched: true };
 }
+
+// ── Adaptive fade measurement (device pixels) ────────────────────────
+// Many apps fade content at scroll-container edges (gradient masks under
+// headers, above chat inputs). Those faded rows are real screenshot pixels:
+// drawing them duplicates a washed-out band at every seam, while trimming a
+// fixed guess deletes live rows on pages that fade nothing. So the first
+// matched seam measures the real fade from the overlap (which holds the same
+// content twice — once crisp, once faded; disagreeing rows ARE the fade) and
+// later strips trim exactly that. Only ever shrinks trims, never grows them.
+
+/** Row disagreement threshold: mean abs red-channel diff above this = faded. */
+export const FADE_ROW_DIFF = 10;
+
+/** Mean abs red-channel difference between two rows (sparse sampling). Null when either is out of range. */
+export function rowMeanAbsDiff(
+  a: { data: Uint8ClampedArray; width: number; height: number },
+  aRow: number,
+  b: { data: Uint8ClampedArray; width: number; height: number },
+  bRow: number
+): number | null {
+  if (aRow < 0 || aRow >= a.height || bRow < 0 || bRow >= b.height) return null;
+  const width = Math.min(a.width, b.width);
+  let total = 0;
+  let count = 0;
+  for (let x = 0; x < width; x += 8) {
+    const av = a.data[(aRow * a.width + x) * 4]!;
+    const bv = b.data[(bRow * b.width + x) * 4]!;
+    total += av > bv ? av - bv : bv - av;
+    count++;
+  }
+  return count === 0 ? null : total / count;
+}
+
+export interface PixBuf {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+}
+
+/**
+ * Measure edge-fade depth at a matched seam. `head` is the new strip's kept
+ * top rows (row 0 = first drawn row); `canvas` is already-drawn pixels with
+ * `regionTop` = canvas Y of its row 0. `matchedY` = canvas Y where head row 0
+ * sits; [prevTop, prevBottom) = canvas span of the previous strip's drawn rows.
+ * Returns fade depth in device px, or null when untrusted (too few comparable
+ * rows, or fade fills the whole probe — the strips don't really line up).
+ */
+export function measureSeamFade(
+  head: PixBuf,
+  canvas: PixBuf,
+  regionTop: number,
+  matchedY: number,
+  prevTop: number,
+  prevBottom: number,
+  maxProbe: number
+): { top: number; bottom: number } | null {
+  // Only the outer half of the overlap is scanned from each side, so the
+  // top-fade scan can never wander into the previous strip's own bottom
+  // fade (or vice versa) — full-probe scans overlap and saturate each other.
+  const half = Math.max(4, Math.floor(Math.max(8, Math.floor(maxProbe)) / 2));
+  if (head.height < half) return null;
+
+  // Top fade of the NEW strip: walk down from its first row. Take the deepest
+  // disagreement, not the first agreement — a blank line inside a fade agrees
+  // with the crisp copy and would end the scan too early.
+  let topFade = 0;
+  let topCompared = 0;
+  for (let r = 0; r < half; r++) {
+    const d = rowMeanAbsDiff(head, r, canvas, matchedY + r - regionTop);
+    if (d === null) continue;
+    topCompared++;
+    if (d > FADE_ROW_DIFF) topFade = r + 1;
+  }
+  // Bottom fade of the PREVIOUS strip: walk up from its last drawn row.
+  // Prev row p shows the same content as head row (p − matchedY).
+  let bottomFade = 0;
+  let bottomCompared = 0;
+  for (let r = 0; r < half; r++) {
+    const prevRow = prevBottom - 1 - r;
+    if (prevRow < prevTop) continue;
+    const d = rowMeanAbsDiff(canvas, prevRow - regionTop, head, prevRow - matchedY);
+    if (d === null) continue;
+    bottomCompared++;
+    if (d > FADE_ROW_DIFF) bottomFade = r + 1;
+  }
+
+  if (topCompared < half || bottomCompared < half) return null;
+  if (topFade >= half || bottomFade >= half) return null;
+  return { top: topFade, bottom: bottomFade };
+}
