@@ -201,31 +201,28 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     });
 
     const tCaptureStart = performance.now();
-    // Constant-HUD contract: the top reserve band is discarded from every
-    // non-top chunk, so the HUD only ever needs hiding for a top-anchored
-    // exposure (whose rows the stitcher keeps). Every other exposure leaves
-    // the HUD up — no per-chunk blinking.
-    const hideForExposure = recordY === 0;
+    // Per-exposure HUD hide: the bar stays visible between shots (so progress
+    // is always readable) and hides only for the instant of each exposure —
+    // that brief hide/show is the blink, kept deliberately per user request.
+    // No trim is needed because the HUD is in NO exposure. The content-side
+    // hide awaits 2 rAFs so the pixels are really gone before the shot fires.
+    // Toolbar badge mirrors % throughout as a second indicator.
     const dataUrl = await withTimeout(
       captureVisibleTabThrottled(
         windowId,
         2,
         async () => {
-          if (tabId && hideForExposure) {
-            try {
-              await sendToContent(tabId, { type: "SCREENX_HIDE_PROGRESS" });
-            } catch {
-              // ignore
-            }
+          try {
+            await sendToContent(tabId, { type: "SCREENX_HIDE_PROGRESS" });
+          } catch {
+            // ignore
           }
         },
         async () => {
-          if (tabId && hideForExposure) {
-            try {
-              await sendToContent(tabId, { type: "SCREENX_SHOW_PROGRESS" });
-            } catch {
-              // ignore
-            }
+          try {
+            await sendToContent(tabId, { type: "SCREENX_SHOW_PROGRESS" });
+          } catch {
+            // ignore
           }
         }
       ),

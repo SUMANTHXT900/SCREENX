@@ -1,8 +1,13 @@
 /**
- * Workspace gallery card.
+ * Workspace gallery card. Memoized: grid re-renders (search keystrokes,
+ * pagination) must not re-render every card — thumbnails cache per record id
+ * inside ThumbImg, so re-renders would only churn React, never pixels.
  */
+import * as React from "react";
 import { Download, ExternalLink, Monitor, ScrollText, Crop, Trash2 } from "lucide-react";
-import type { CaptureRecord } from "@/storage/idb/capturesRepo";
+import type { CaptureMeta } from "@/storage/idb/capturesRepo";
+import type { Group } from "../groups";
+import ThumbImg from "./ThumbImg";
 
 const TYPE_META = {
   visible: { label: "Visible", Icon: Monitor, tile: "bg-[#4ADE80]" },
@@ -11,17 +16,16 @@ const TYPE_META = {
 } as const;
 
 interface Props {
-  record: CaptureRecord;
-  objectUrl: string;
-  /** >1 when this card covers an auto-split group (cover = first part). */
-  partCount?: number;
-  /** Card-scoped actions — closures already bound to this card's group. */
-  onOpen: () => void;
-  onDownload: () => void;
-  onDelete: () => void;
+  group: Group<CaptureMeta>;
+  /** Stable group-scoped actions — same identities across renders so memo holds. */
+  onOpen: (g: Group<CaptureMeta>) => void;
+  onDownload: (g: Group<CaptureMeta>) => void;
+  onDelete: (g: Group<CaptureMeta>) => void;
 }
 
-export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDownload, onDelete }: Props): React.JSX.Element {
+function CaptureCard({ group, onOpen, onDownload, onDelete }: Props): React.JSX.Element {
+  const record = group.first;
+  const partCount = group.count > 1 ? group.count : undefined;
   const meta = TYPE_META[record.type] ?? TYPE_META.visible;
   const host = (() => {
     try {
@@ -38,16 +42,14 @@ export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDo
     >
       <button
         type="button"
-        onClick={onOpen}
+        onClick={() => onOpen(group)}
         className="relative block aspect-video w-full cursor-pointer overflow-hidden border-b-[3px] border-black bg-black/5"
         title={partCount ? `Open all ${partCount} parts in editor` : "Open in editor"}
       >
-        <img
-          src={objectUrl}
+        <ThumbImg
+          recordId={record.id}
           alt={record.sourceTitle ?? "Screenshot"}
           className="h-full w-full object-cover object-top transition-transform duration-100 group-hover:scale-[1.01]"
-          loading="lazy"
-          decoding="async"
         />
         {partCount != null && (
           <span className="absolute right-2 top-2 border-2 border-black bg-[#FBBF24] px-1.5 py-0.5 font-mono text-[10px] font-bold text-black">
@@ -77,14 +79,14 @@ export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDo
         <div className="mt-2.5 flex items-center gap-2">
           <button
             type="button"
-            onClick={onOpen}
+            onClick={() => onOpen(group)}
             className="inline-flex flex-1 cursor-pointer items-center justify-center gap-1 border-2 border-black bg-black px-2 py-1.5 text-xs font-bold text-white shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[4px_4px_0_#000] active:translate-x-[3px] active:translate-y-[3px] active:shadow-none"
           >
             <ExternalLink className="h-3 w-3" strokeWidth={2.5} /> Open
           </button>
           <button
             type="button"
-            onClick={onDownload}
+            onClick={() => onDownload(group)}
             className="inline-flex cursor-pointer items-center justify-center border-2 border-black bg-white p-1.5 text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:bg-[#60A5FA] hover:shadow-[4px_4px_0_#000] active:translate-x-[3px] active:translate-y-[3px] active:shadow-none"
             title={partCount != null ? `Download all ${partCount} parts` : "Download PNG"}
             aria-label={partCount != null ? `Download all ${partCount} parts` : "Download screenshot"}
@@ -93,7 +95,7 @@ export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDo
           </button>
           <button
             type="button"
-            onClick={onDelete}
+            onClick={() => void onDelete(group)}
             className="inline-flex cursor-pointer items-center justify-center border-2 border-black bg-[#F87171] p-1.5 text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[4px_4px_0_#000] active:translate-x-[3px] active:translate-y-[3px] active:shadow-none"
             title={partCount != null ? `Delete all ${partCount} parts` : "Delete"}
             aria-label={partCount != null ? `Delete all ${partCount} parts` : "Delete screenshot"}
@@ -105,3 +107,5 @@ export default function CaptureCard({ record, objectUrl, partCount, onOpen, onDo
     </div>
   );
 }
+
+export default React.memo(CaptureCard);

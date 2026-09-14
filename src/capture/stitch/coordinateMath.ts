@@ -116,14 +116,25 @@ export const ALIGN_SEARCH = 120;
 export const ALIGN_MIN_DETAIL = 6;
 export const ALIGN_MAX_ERROR = 26;
 
-/** Pixel variation in a band (red channel, sparse sampling). Flat bands match anywhere — untrusted. */
+/** Luminance of a pixel (rec.601): text edges live in all channels, not just red. */
+function luminanceAt(data: Uint8ClampedArray, index: number): number {
+  const r = data[index]!;
+  const g = data[index + 1]!;
+  const b = data[index + 2]!;
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/** Pixel variation in a band (luminance, dense sampling). Flat bands match anywhere — untrusted. */
 export function bandDetail(data: Uint8ClampedArray, width: number, height: number): number {
   let minimum = 255;
   let maximum = 0;
   let count = 0;
-  for (let y = 0; y < height; y += 2) {
-    for (let x = 0; x < width; x += 8) {
-      const value = data[(y * width + x) * 4]!;
+  // Every row, every 4th column: thin 1px text lines vanish under y+=2/x+=8
+  // sparse sampling, making textured bands look blank (seams then fall back
+  // to scroll math and tear). Denser sampling costs ~4x but the band is tiny.
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 4) {
+      const value = luminanceAt(data, (y * width + x) * 4);
       if (value < minimum) minimum = value;
       if (value > maximum) maximum = value;
       count++;
@@ -132,7 +143,7 @@ export function bandDetail(data: Uint8ClampedArray, width: number, height: numbe
   return count === 0 ? 0 : maximum - minimum;
 }
 
-/** Mean abs red-channel difference placing the band at candidateY (Infinity if out of region). */
+/** Mean abs luminance difference placing the band at candidateY (Infinity if out of region). */
 export function bandMeanError(
   band: { data: Uint8ClampedArray; width: number; height: number },
   region: { data: Uint8ClampedArray; width: number; height: number },
@@ -141,12 +152,12 @@ export function bandMeanError(
 ): number {
   let total = 0;
   let count = 0;
-  for (let y = 0; y < band.height; y += 2) {
+  for (let y = 0; y < band.height; y += 1) {
     const regionRow = candidateY + y - regionTop;
     if (regionRow < 0 || regionRow >= region.height) return Infinity;
-    for (let x = 0; x < band.width; x += 8) {
-      const a = band.data[(y * band.width + x) * 4]!;
-      const b = region.data[(regionRow * region.width + x) * 4]!;
+    for (let x = 0; x < band.width; x += 4) {
+      const a = luminanceAt(band.data, (y * band.width + x) * 4);
+      const b = luminanceAt(region.data, (regionRow * region.width + x) * 4);
       total += a > b ? a - b : b - a;
       count++;
     }
@@ -191,7 +202,7 @@ export function findBestAlignment(
 /** Row disagreement threshold: mean abs red-channel diff above this = faded. */
 export const FADE_ROW_DIFF = 10;
 
-/** Mean abs red-channel difference between two rows (sparse sampling). Null when either is out of range. */
+/** Mean abs luminance difference between two rows (dense sampling). Null when either is out of range. */
 export function rowMeanAbsDiff(
   a: { data: Uint8ClampedArray; width: number; height: number },
   aRow: number,
@@ -202,9 +213,9 @@ export function rowMeanAbsDiff(
   const width = Math.min(a.width, b.width);
   let total = 0;
   let count = 0;
-  for (let x = 0; x < width; x += 8) {
-    const av = a.data[(aRow * a.width + x) * 4]!;
-    const bv = b.data[(bRow * b.width + x) * 4]!;
+  for (let x = 0; x < width; x += 4) {
+    const av = luminanceAt(a.data, (aRow * a.width + x) * 4);
+    const bv = luminanceAt(b.data, (bRow * b.width + x) * 4);
     total += av > bv ? av - bv : bv - av;
     count++;
   }

@@ -1,18 +1,29 @@
 /**
- * Sticky/fixed bar hider for multi-strip captures.
+ * Sticky/fixed widget hider for multi-strip captures.
  *
- * Rationale: fixed and sticky bars (nav headers, filter chips, chat inputs)
- * stay glued to the viewport while content scrolls past, so every strip
- * photographs them again. Trimming them out of each strip instead deletes
- * LIVE rows on chunks where a sticky bar isn't docked (white seam bands),
- * and no aligner can recover deleted rows. Hiding the bars during the pass
- * removes the problem at the source: every strip then holds only scrolling
- * content, and duplication is impossible by construction.
+ * Capture-as-is contract: hiding is page mutation, and `visibility:hidden`
+ * on an ancestor hides its WHOLE subtree — one over-eager hide of a sticky
+ * content wrapper deletes real fields (e.g. a form input) from EVERY strip,
+ * which no stitcher can recover. That data-loss class is worse than any
+ * cosmetic seam, so hiding is deliberately minimal now:
  *
- * Deliberately spared (hiding these breaks the page or blanks the shot):
+ *  - ONLY tiny floating widgets are hidden (icon buttons, chat bubbles,
+ *    back-to-top pills): they repeat in every strip, can't be trimmed (they
+ *    sit outside the top/bottom occlusion bands), and carry no content.
+ *  - Bars, headers, banners and sections are NEVER hidden, even docked ones:
+ *    a docked strip can be page content (contact bar, cookie notice, sticky
+ *    section) and structure alone can't tell chrome from content. Fixed
+ *    top/bottom bars are still removed via measured occlusion TRIMS (which
+ *    only cut viewport-docked bands and keep one full copy in the top chunk),
+ *    and sticky leftovers may cosmetically repeat — accepted, documented.
+ *
+ * Deliberately spared (hiding these loses content or blanks the shot):
  *  - our own UI (ids starting with __screenx)
  *  - any ancestor of the active scroll container (chat apps often fix the
  *    whole app shell — hiding it blanks the viewport)
+ *  - anything larger than a small widget (bars, panels, wrappers, sections)
+ *  - anything containing form controls (input/textarea/select/contenteditable)
+ *  - anything containing media (img/video/canvas/iframe/svg) or >80 text chars
  *  - elements taller than 60% of the viewport (layout wrappers, not bars)
  *  - bars that don't overlap the capture band horizontally
  *
@@ -64,10 +75,49 @@ function isOwnUi(el: Element): boolean {
 }
 
 /**
- * Hide fixed/sticky bars overlapping [bandLeft, bandRight] (CSS px, viewport
- * space; defaults to the full viewport). Returns the hidden count.
- * `scrollRoot` is the active scroller element (or window): its ancestors are
- * spared. Idempotent — hides only what isn't already hidden by us.
+ * DOM-free hide decision (pure — unit-tested). Only tiny, content-free
+ * floating widgets qualify. Everything else stays exactly as-is on the page.
+ */
+export interface HideCandidate {
+  width: number;
+  height: number;
+  /** Visible text length inside the element (textContent, trimmed). */
+  textLength: number;
+  /** True when the element or any descendant is a form control. */
+  hasFormControl: boolean;
+  /** True when the element or any descendant is media (img/video/canvas/iframe/svg). */
+  hasMedia: boolean;
+}
+
+/** Max widget dimension (CSS px) eligible for hiding — bars/panels never qualify. */
+export const MAX_HIDE_WIDGET_PX = 200;
+/** Max text length (chars) eligible for hiding — content sections never qualify. */
+export const MAX_HIDE_TEXT_LEN = 80;
+
+export function shouldHideCandidate(c: HideCandidate): boolean {
+  if (c.width > MAX_HIDE_WIDGET_PX || c.height > MAX_HIDE_WIDGET_PX) return false;
+  if (c.hasFormControl || c.hasMedia) return false;
+  if (c.textLength > MAX_HIDE_TEXT_LEN) return false;
+  return true;
+}
+
+const FORM_CONTROL_SELECTOR = "input,textarea,select,[contenteditable]";
+const MEDIA_SELECTOR = "img,video,canvas,iframe,svg";
+
+function subtreeHas(el: HTMLElement, selector: string): boolean {
+  try {
+    if (typeof el.matches === "function" && el.matches(selector)) return true;
+    return el.querySelector(selector) !== null;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Hide content-free floating widgets overlapping [bandLeft, bandRight] (CSS
+ * px, viewport space; defaults to the full viewport). Returns the hidden
+ * count. `scrollRoot` is the active scroller element (or window): its
+ * ancestors are spared. Idempotent — hides only what isn't already hidden.
  */
 export function hideStickyBars(
   bandLeft?: number,
@@ -109,6 +159,28 @@ export function hideStickyBars(
     if (rect.width === 0 || rect.height === 0) continue;
     if (rect.height > tallLimit) continue; // a wrapper, not a bar
     if (rect.right <= left || rect.left >= right) continue;
+
+    // Capture-as-is: only tiny content-free widgets may be hidden. A sticky
+    // ancestor hides its whole subtree, so one wrong hide deletes live
+    // fields from every strip — size + form + media + text guards keep that
+    // from ever happening again.
+    let textLength = 0;
+    try {
+      textLength = (el.textContent ?? "").trim().length;
+    } catch {
+      textLength = Number.MAX_SAFE_INTEGER;
+    }
+    if (
+      !shouldHideCandidate({
+        width: rect.width,
+        height: rect.height,
+        textLength,
+        hasFormControl: subtreeHas(el, FORM_CONTROL_SELECTOR),
+        hasMedia: subtreeHas(el, MEDIA_SELECTOR),
+      })
+    ) {
+      continue;
+    }
 
     let value = "";
     let priority = "";

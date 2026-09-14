@@ -1,7 +1,7 @@
 import * as React from "react";
 import { Clock, Library, Loader2, Search, Trash2, Monitor, ScrollText, Crop } from "lucide-react";
 import { clearHistory, deleteHistoryEntry, listHistory, listTombstones, logHistoryEntry, reconcileHistory, type HistoryEntry } from "@/storage/history/activityLog";
-import { listCaptures } from "@/storage/idb/capturesRepo";
+import { listCaptureMeta } from "@/storage/idb/capturesRepo";
 
 function workspaceUrl(): string {
   try {
@@ -29,6 +29,45 @@ function hostOf(url: string | undefined): string {
   }
 }
 
+/** Memoized row: filter keystrokes re-render the list shell, not every row. */
+const HistoryRow = React.memo(function HistoryRow({
+  entry,
+  onDelete,
+}: {
+  entry: HistoryEntry;
+  onDelete: (id: string) => void;
+}): React.JSX.Element {
+  const meta = TYPE_META[entry.type] ?? TYPE_META.visible;
+  return (
+    <li className="flex items-center gap-3 border-b-2 border-black/10 px-4 py-3 last:border-b-0">
+      <span className={`flex h-9 w-9 shrink-0 items-center justify-center border-2 border-black ${meta.tile}`}>
+        <meta.Icon className="h-4 w-4 text-black" strokeWidth={2.25} />
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-bold">{entry.sourceTitle ?? hostOf(entry.sourceUrl)}</div>
+        <div className="truncate font-mono text-[11px] text-black/60">
+          {meta.label}
+          {entry.partTotal != null && entry.partTotal > 1 ? ` • part ${entry.partIndex}/${entry.partTotal}` : ""} •{" "}
+          {hostOf(entry.sourceUrl)}
+          {entry.width ? ` • ${entry.width}×${entry.height}` : ""} • id {entry.id.slice(0, 8)}
+        </div>
+      </div>
+      <span className="hidden shrink-0 font-mono text-[11px] text-black/60 sm:inline">
+        {new Date(entry.createdAt).toLocaleString()}
+      </span>
+      <button
+        type="button"
+        onClick={() => onDelete(entry.id)}
+        title="Delete this entry"
+        aria-label={`Delete history entry ${entry.id.slice(0, 8)}`}
+        className="shrink-0 cursor-pointer border-2 border-black bg-white p-1.5 shadow-[2px_2px_0_#000] transition-all duration-100 hover:bg-[#F87171] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
+      >
+        <Trash2 className="h-3.5 w-3.5" strokeWidth={2.5} />
+      </button>
+    </li>
+  );
+});
+
 export default function HistoryApp(): React.JSX.Element {
   const [entries, setEntries] = React.useState<HistoryEntry[]>([]);
   const [loading, setLoading] = React.useState(true);
@@ -44,17 +83,15 @@ export default function HistoryApp(): React.JSX.Element {
         // never backfilled, so deletes stick.
         const [log, records, tombstoned] = await Promise.all([
           listHistory(),
-          listCaptures(200).catch(() => []),
+          // Metadata only — history never touches blobs; listing full records
+          // here deserialized every image for nothing on large libraries.
+          listCaptureMeta(200).catch(() => []),
           listTombstones(),
         ]);
         const { visible, backfill } = reconcileHistory(log, records, tombstoned);
-        for (const entry of backfill) {
-          try {
-            await logHistoryEntry(entry);
-          } catch {
-            // ignore — best-effort
-          }
-        }
+        // Parallel best-effort backfill: sequential awaits made first load
+        // crawl when many pre-logging captures needed lines.
+        await Promise.allSettled(backfill.map((entry) => logHistoryEntry(entry)));
         if (!cancelled) {
           setEntries(visible);
         }
@@ -87,7 +124,9 @@ export default function HistoryApp(): React.JSX.Element {
     }
   }, []);
 
-  const q = query.trim().toLowerCase();
+  // Deferred filter: typing stays instant while a long list filters behind.
+  const deferredQuery = React.useDeferredValue(query);
+  const q = deferredQuery.trim().toLowerCase();
   const filtered = React.useMemo(
     () =>
       q
@@ -196,43 +235,9 @@ export default function HistoryApp(): React.JSX.Element {
         {!loading && visible.length > 0 && (
           <>
             <ol className="border-[3px] border-black bg-[#FFFDF7] shadow-[6px_6px_0_#000]">
-            {visible.map((e) => {
-              const meta = TYPE_META[e.type] ?? TYPE_META.visible;
-              return (
-                <li
-                  key={e.id}
-                  className="flex items-center gap-3 border-b-2 border-black/10 px-4 py-3 last:border-b-0"
-                >
-                  <span
-                    className={`flex h-9 w-9 shrink-0 items-center justify-center border-2 border-black ${meta.tile}`}
-                  >
-                    <meta.Icon className="h-4 w-4 text-black" strokeWidth={2.25} />
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-bold">
-                      {e.sourceTitle ?? hostOf(e.sourceUrl)}
-                    </div>
-                    <div className="truncate font-mono text-[11px] text-black/60">
-                      {meta.label}
-                      {e.partTotal != null && e.partTotal > 1 ? ` • part ${e.partIndex}/${e.partTotal}` : ""} • {hostOf(e.sourceUrl)}
-                      {e.width ? ` • ${e.width}×${e.height}` : ""} • id {e.id.slice(0, 8)}
-                    </div>
-                  </div>
-                  <span className="hidden shrink-0 font-mono text-[11px] text-black/60 sm:inline">
-                    {new Date(e.createdAt).toLocaleString()}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => void removeOne(e.id)}
-                    title="Delete this entry"
-                    aria-label={`Delete history entry ${e.id.slice(0, 8)}`}
-                    className="shrink-0 cursor-pointer border-2 border-black bg-white p-1.5 shadow-[2px_2px_0_#000] transition-all duration-100 hover:bg-[#F87171] active:translate-x-[2px] active:translate-y-[2px] active:shadow-none"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" strokeWidth={2.5} />
-                  </button>
-                </li>
-              );
-            })}
+              {visible.map((e) => (
+                <HistoryRow key={e.id} entry={e} onDelete={removeOne} />
+              ))}
             </ol>
             {visibleCount < filtered.length && (
               <div className="mt-6 text-center">

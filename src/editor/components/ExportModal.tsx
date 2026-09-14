@@ -15,6 +15,14 @@ interface Props {
   onDownload: () => void;
   /** Multi-part captures: offer per-part files when the flattened export can't fit. */
   onDownloadParts?: (() => void) | null;
+  /** True when the stacked total is known to exceed canvas limits. */
+  singleBlocked?: boolean;
+  /** Scaled whole-page fallback (fits limits) — shown only when blocked. */
+  onDownloadScaled?: (() => void) | null;
+  scaledLabel?: string;
+  /** Full-resolution single PNG (streamed, bypasses canvas limits). */
+  onDownloadFullRes?: (() => void) | null;
+  fullResLabel?: string;
 }
 
 const FORMATS: { id: ExportFormat; label: string; hint: string }[] = [
@@ -23,7 +31,7 @@ const FORMATS: { id: ExportFormat; label: string; hint: string }[] = [
   { id: "webp", label: "WebP", hint: "modern" },
 ];
 
-export default function ExportModal({ open, busy, error, fileName, onClose, onDownload, onDownloadParts }: Props): React.JSX.Element | null {
+export default function ExportModal({ open, busy, error, fileName, onClose, onDownload, onDownloadParts, singleBlocked, onDownloadScaled, scaledLabel, onDownloadFullRes, fullResLabel }: Props): React.JSX.Element | null {
   const exportFormat = useSettingsStore((s) => s.exportFormat);
   const setExportFormat = useSettingsStore((s) => s.setExportFormat);
   const exportQuality = useSettingsStore((s) => s.exportQuality);
@@ -111,11 +119,34 @@ export default function ExportModal({ open, busy, error, fileName, onClose, onDo
         <button
           type="button"
           onClick={onDownload}
-          disabled={busy}
+          disabled={busy || singleBlocked}
+          title={singleBlocked ? "Stacked total exceeds browser canvas limits — use parts below" : undefined}
           className="mt-4 inline-flex w-full cursor-pointer items-center justify-center gap-1.5 border-2 border-black bg-black px-3 py-2.5 text-sm font-bold text-white shadow-[4px_4px_0_rgba(0,0,0,0.3)] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
         >
-          <Download className="h-4 w-4" strokeWidth={2.5} /> {busy ? "Rendering…" : `Download ${exportFormat.toUpperCase()}`}
+          <Download className="h-4 w-4" strokeWidth={2.5} /> {busy ? "Rendering…" : singleBlocked ? `Single file too tall` : `Download ${exportFormat.toUpperCase()}`}
         </button>
+        {singleBlocked && onDownloadFullRes && (
+          <button
+            type="button"
+            onClick={onDownloadFullRes}
+            disabled={busy}
+            title="Whole page in one PNG at 100% resolution — encoded without a canvas, so no quality loss"
+            className="mt-2 inline-flex w-full cursor-pointer items-center justify-center gap-1.5 border-2 border-black bg-[#4ADE80] px-3 py-2.5 text-sm font-bold text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Download className="h-4 w-4" strokeWidth={2.5} /> {busy ? "Rendering…" : (fullResLabel ?? "Download single PNG · full resolution")}
+          </button>
+        )}
+        {singleBlocked && onDownloadScaled && (
+          <button
+            type="button"
+            onClick={onDownloadScaled}
+            disabled={busy}
+            title="Whole page in one file in your chosen format, shrunk just enough to fit browser canvas limits"
+            className="mt-2 inline-flex w-full cursor-pointer items-center justify-center gap-1.5 border-2 border-black bg-white px-3 py-2 text-xs font-bold text-black shadow-[3px_3px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <Download className="h-3.5 w-3.5" strokeWidth={2.5} /> {scaledLabel ?? "Download single file (scaled to fit)"}
+          </button>
+        )}
         {onDownloadParts && (
           <button
             type="button"

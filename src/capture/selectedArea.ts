@@ -4,7 +4,6 @@ import { isRestrictedUrl, queryActiveTab, withTimeout } from "./captureUtils";
 import { calculateTotalTimeout } from "./planner/adaptiveStep";
 import { planRangePositions, selectionRangeToTargets } from "./planner/rangePlan";
 import { computeRangeOcclusion } from "./planner/occlusion";
-import { HUD_RESERVE_PX } from "./stitch/limits";
 import { planSegments } from "./planner/segments";
 import { ensureContentScript } from "./client/ensureContent";
 import { sendProgress, sendToContent } from "./client/contentBridge";
@@ -414,10 +413,10 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       normalizedSelection.x,
       normalizedSelection.x + normalizedSelection.width
     );
-    // Constant-HUD contract: see fullPage.ts — surviving trim is whichever is
-    // larger (real bars or the always-visible HUD).
-    let occludedTopHeight = Math.max(occlusion.top, HUD_RESERVE_PX);
-    let occludedBottomHeight = occlusion.bottom;
+    // Robust-HUD contract: see fullPage.ts — the HUD is hidden per exposure,
+    // so only real measured bars are trimmed (no reserve band).
+    const occludedTopHeight = occlusion.top;
+    const occludedBottomHeight = occlusion.bottom;
 
     if (metrics.controllerType && metrics.controllerType !== "window") {
       console.warn("[ScreenX][SelectedArea] nested controller detected", JSON.stringify(metrics));
@@ -426,8 +425,9 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
     await withTimeout(sendToContent<{ ok: true }>(tab.id, { type: "SCREENX_PREPARE_CAPTURE" }), CONTENT_TIMEOUT_MS, "Prepare");
     prepared = true;
 
-    // Multi-strip passes hide fixed/sticky bars overlapping the selection
-    // band instead of trimming them (see fullPage.ts — same rationale).
+    // Multi-strip passes hide tiny floating widgets overlapping the selection
+    // band (see fullPage.ts — same rationale). Measured occlusion trims stand
+    // regardless: the hider only takes unmeasurable widgets now, never bars.
     // Single-shot captures skip hiding so the shot looks like the screen.
     if (endY - startY > viewportHeight) {
       const hide = await hideStickyBarsForCapture(
@@ -436,10 +436,6 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
         normalizedSelection.x + normalizedSelection.width
       );
       stickyHidden = hide.active;
-      if (hide.active) {
-        occludedTopHeight = HUD_RESERVE_PX;
-        occludedBottomHeight = 0;
-      }
     }
 
     const positions = planRangePositions(startY, endY, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);

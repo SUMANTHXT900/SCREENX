@@ -47,7 +47,7 @@ jobs:
             screenx-v*.zip
           generate_release_notes: false
           body: |
-            ## ScreenX ${{ github.ref_name }} — ready to install, no build needed
+            ## ScreenX ${{ github.ref_name }} (asis) — ready to install, no build needed
 
             **New here? Install in 2 minutes:**
 
@@ -56,6 +56,34 @@ jobs:
             3. Click **Load unpacked** → select the unzipped folder. Done — pin ScreenX to the toolbar.
 
             To update later, download the zip again, replace the folder contents, and hit **Reload** on `chrome://extensions`. (`screenx-${{ github.ref_name }}.zip` below is the identical, version-stamped copy.)
+
+            ---
+
+            ### What's new in v0.1.25 (asis)
+
+            **Capture-as-is — no more disappearing content.** The sticky-bar hider used to hide every
+            `fixed`/`sticky` element during full-page passes, and hiding a sticky ancestor wipes its whole
+            subtree (e.g. form fields vanishing from a Google Form). Now only tiny content-free floating
+            widgets (chat bubbles, FABs) are ever hidden; bars, headers and sections stay exactly as-is.
+            Fixed top/bottom bars are still removed via measured occlusion trims.
+
+            **Gapless stitching.** Per-exposure progress-HUD hiding (no more 120px trim eating live rows),
+            canvas/bitmap scale decoupling for fractional-DPR drift, doc-space gap healing, novel-only
+            strip drawing (no ghost duplication), per-seam fade measurement, luminance-based alignment,
+            and a quiet-content settle (webfonts + layout height) before each shot.
+
+            **Export past canvas limits.** Stacked totals taller than Chrome's 32767px limit no longer
+            dead-end: download a **full-resolution single PNG** (streamed encoder, zero quality loss, no
+            giant canvas), a scaled single file in your format, or the parts individually — with an
+            upfront fit pre-check instead of a post-click failure.
+
+            **Faster Workspace & History.** Grid shows 480px lazy thumbnails (full blobs are never decoded
+            for the list), blob-free metadata listing, deferred search, memoized cards/rows, parallel
+            history backfill.
+
+            **Popup shortcut help.** New "Customize keyboard shortcuts" panel — Chrome gives extensions no
+            API to set shortcuts themselves, so it walks you to `chrome://extensions/shortcuts` (redirect
+            attempt + copy-address fallback).
 
             ---
 

@@ -1,5 +1,5 @@
 import * as React from "react";
-import { Monitor, Scan, ScrollText, Clock, Library, Loader2, AlertCircle, X, Github } from "lucide-react";
+import { Monitor, Scan, ScrollText, Clock, Library, Loader2, AlertCircle, X, Github, Keyboard } from "lucide-react";
 import { CaptureError, type CaptureType } from "@/types";
 import { buildTag } from "@/version";
 
@@ -113,6 +113,12 @@ export default function App(): React.JSX.Element {
   // Live key bindings (null = still loading). A command Chrome left unassigned
   // (conflict at install time) shows "Not set" instead of a lying default.
   const [bindings, setBindings] = React.useState<Record<string, string | null> | null>(null);
+  // Shortcut-settings helper: Chrome gives extensions NO API to change their
+  // own shortcuts (manifest suggested_key only proposes install-time
+  // defaults) — the user must edit them at chrome://extensions/shortcuts, so
+  // this panel walks them there instead of pretending to save in-UI.
+  const [showKeysHelp, setShowKeysHelp] = React.useState(false);
+  const [keysMsg, setKeysMsg] = React.useState<string | null>(null);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -156,6 +162,39 @@ export default function App(): React.JSX.Element {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const openShortcutSettings = React.useCallback(() => {
+    // Best-effort redirect: Chrome blocks extensions from opening chrome://
+    // pages in some builds — on failure the help panel below stays open with
+    // manual steps + a copyable address instead.
+    setShowKeysHelp(true);
+    setKeysMsg(null);
+    try {
+      if (chrome.tabs?.create) {
+        chrome.tabs.create({ url: "chrome://extensions/shortcuts" }, () => {
+          const err = chrome.runtime?.lastError;
+          if (err) {
+            setKeysMsg("Chrome blocked the automatic redirect — follow the steps below.");
+          } else {
+            window.close();
+          }
+        });
+        return;
+      }
+      setKeysMsg("Copy the address below and paste it into your address bar.");
+    } catch {
+      setKeysMsg("Copy the address below and paste it into your address bar.");
+    }
+  }, []);
+
+  const copyShortcutsUrl = React.useCallback(async () => {
+    try {
+      await navigator.clipboard?.writeText("chrome://extensions/shortcuts");
+      setKeysMsg("Copied — paste it into your address bar.");
+    } catch {
+      setKeysMsg("Copy failed — type chrome://extensions/shortcuts manually.");
+    }
   }, []);
 
   const handleCapture = React.useCallback(
@@ -276,6 +315,54 @@ export default function App(): React.JSX.Element {
             );
           })}
         </div>
+
+        <button
+          type="button"
+          onClick={() => setShowKeysHelp((v) => !v)}
+          aria-expanded={showKeysHelp}
+          title="Change the Alt+Shift+S / F / C keyboard shortcuts"
+          className="mt-3 inline-flex w-full cursor-pointer items-center justify-center gap-1.5 border-2 border-black bg-white px-3 py-2 text-xs font-bold shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000]"
+        >
+          <Keyboard className="h-3.5 w-3.5" strokeWidth={2.5} />
+          {showKeysHelp ? "Hide shortcut settings" : "Customize keyboard shortcuts"}
+        </button>
+
+        {showKeysHelp && (
+          <div className="mt-2 border-2 border-black bg-white px-3 py-2.5 text-[12px] font-medium leading-snug shadow-[4px_4px_0_#000]">
+            <p className="font-bold">Change capture shortcuts</p>
+            <ol className="mt-1.5 list-decimal space-y-1 pl-5 text-black/70">
+              <li>
+                Open{" "}
+                <code className="border border-black bg-[#FFF6E9] px-1 font-mono text-[11px] font-bold text-black">
+                  chrome://extensions/shortcuts
+                </code>
+              </li>
+              <li>Find ScreenX, click the pencil icon.</li>
+              <li>Type your keys (e.g. Alt+Shift+S) and confirm.</li>
+            </ol>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                onClick={openShortcutSettings}
+                className="flex-1 cursor-pointer border-2 border-black bg-black px-2 py-1.5 text-[11px] font-bold text-white shadow-[2px_2px_0_rgba(0,0,0,0.35)] hover:translate-x-[-1px] hover:translate-y-[-1px]"
+              >
+                Open shortcuts page
+              </button>
+              <button
+                type="button"
+                onClick={() => void copyShortcutsUrl()}
+                className="flex-1 cursor-pointer border-2 border-black bg-white px-2 py-1.5 text-[11px] font-bold shadow-[2px_2px_0_#000] hover:translate-x-[-1px] hover:translate-y-[-1px]"
+              >
+                Copy address
+              </button>
+            </div>
+            {keysMsg && <p className="mt-1.5 font-mono text-[11px] font-bold text-black">{keysMsg}</p>}
+            <p className="mt-1.5 text-[11px] text-black/55">
+              Note: Chrome doesn't let extensions change shortcuts from their own UI — the
+              manifest can only suggest defaults. This page is the only place they can be edited.
+            </p>
+          </div>
+        )}
 
         {error && (
           <div className="mt-3 flex items-start gap-2 border-2 border-black bg-[#F87171] px-3 py-2.5 text-[12.5px] font-medium leading-snug shadow-[4px_4px_0_#000]">

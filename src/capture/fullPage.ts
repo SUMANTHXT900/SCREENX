@@ -2,7 +2,7 @@ import { CaptureError, type CaptureResult } from "@/types";
 import type { MeasureResponse } from "@/messaging/events";
 import { stitchImages } from "./stitch";
 import { createStitcher } from "./stitch/canvasStitcher";
-import { MAX_TOTAL_HEIGHT, HUD_RESERVE_PX } from "./stitch/limits";
+import { MAX_TOTAL_HEIGHT } from "./stitch/limits";
 import { ensureContentScript } from "./client/ensureContent";
 import { sendProgress, sendToContent } from "./client/contentBridge";
 import { isRestrictedUrl, queryActiveTab, withTimeout } from "./captureUtils";
@@ -86,10 +86,12 @@ export async function captureFullPage(): Promise<CaptureResult> {
     }
 
     const occlusion = computeFullPageOcclusion(metrics.fixedElements, viewportWidth, viewportHeight);
-    // Constant-HUD contract: the reserve band covers the always-visible HUD,
-    // so the surviving trim is whichever is larger (real bars or HUD).
-    let occludedTopHeight = Math.max(occlusion.top, HUD_RESERVE_PX);
-    let occludedBottomHeight = occlusion.bottom;
+    // Robust-HUD contract: the capture loop hides the progress HUD for EVERY
+    // exposure, so no reserve band is trimmed. Trimming a fixed band deletes
+    // live rows whenever the HUD renders shorter than the reserve — the
+    // classic cut-text seam. Only real measured bars are trimmed.
+    const occludedTopHeight = occlusion.top;
+    const occludedBottomHeight = occlusion.bottom;
 
     // Check for nested scroll container that would make capture incorrect
     if (metrics.controllerType && metrics.controllerType !== "window") {
@@ -103,20 +105,16 @@ export async function captureFullPage(): Promise<CaptureResult> {
     );
     prepared = true;
 
-    // Multi-strip passes hide fixed/sticky bars instead of trimming them:
-    // hidden bars can't repeat down the image, and no live rows are deleted
-    // (trimming a sticky bar that isn't docked in some chunk cuts live rows
-    // into white bands). The measured occlusion trims then drop to the HUD
-    // reserve — the HUD still shows on non-top exposures. Single-shot
+    // Multi-strip passes hide tiny floating widgets (chat bubbles, FABs)
+    // that would otherwise repeat in every strip. Bars/headers/sections are
+    // NEVER hidden (capture-as-is: hiding a sticky ancestor deletes its whole
+    // subtree from every strip). Measured fixed top/bottom bars are still
+    // removed via occlusion TRIMS regardless of hiding — the hider only ever
+    // takes unmeasurable widgets now, so trims must stand. Single-shot
     // captures skip hiding so the shot looks exactly like the screen.
-    // Hide failures fall back to occlusion trimming (never fail the capture).
     if (totalHeight > viewportHeight) {
       const hide = await hideStickyBarsForCapture(tab.id);
       stickyHidden = hide.active;
-      if (hide.active) {
-        occludedTopHeight = HUD_RESERVE_PX;
-        occludedBottomHeight = 0;
-      }
     }
 
     // Calculate positions using shared planner (allowing up to 300 viewports with adaptive stepping)
