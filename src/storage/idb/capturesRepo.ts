@@ -160,6 +160,20 @@ export async function countCaptures(): Promise<number> {
   }
 }
 
+/** Metadata-only view: everything except the Blob. Listing pages (Workspace
+ * grid, History reconcile) must use this — materializing N full Blobs just
+ * to render a list is what made those pages lag with large libraries. */
+export type CaptureMeta = Omit<CaptureRecord, "blob">;
+
+export async function listCaptureMeta(limit = 200): Promise<CaptureMeta[]> {
+  const records = await listCaptures(limit);
+  return records.map((r) => {
+    const { blob: _drop, ...meta } = r;
+    void _drop;
+    return meta;
+  });
+}
+
 export async function listCaptures(limit = 100): Promise<CaptureRecord[]> {  let db: IDBDatabase | null = null;
   try {
     db = await openDB();

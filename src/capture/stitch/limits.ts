@@ -11,12 +11,12 @@ export const MAX_CANVAS_WIDTH = 32767;
 export const MAX_CANVAS_HEIGHT = 32767;
 
 /**
- * Top-strip rows reserved for the progress HUD (CSS px). The HUD stays
- * visible for the whole capture loop (constant, live-updating — never
- * blinking per exposure), and the stitcher discards exactly this band from
- * every strip except a top-anchored first chunk (whose single exposure hides
- * the HUD once). Keep the HUD's rendered height under this (currently ~64px;
- * 120 covers page zoom up to ~175%). Raising it costs ~1 extra chunk per
- * ~800px of page height.
+ * Legacy top-strip reserve for the progress HUD (CSS px). Kept for backward
+ * compatibility; the capture loop now hides the HUD for EVERY exposure, so
+ * new captures plan with a 0 reserve and never trim live rows to remove the
+ * HUD. Trimming a fixed 120px band was the #1 seam-breakage source: whenever
+ * the HUD rendered shorter than the reserve, 120−actual rows of real content
+ * were deleted at every seam (cut sentences, white bands).
+ * @deprecated Do not use for new planning — pass measured occlusion only.
  */
-export const HUD_RESERVE_PX = 120;
+export const HUD_RESERVE_PX = 0;

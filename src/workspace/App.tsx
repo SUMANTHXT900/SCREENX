@@ -3,9 +3,10 @@ import { Library, Search, Loader2, ImageOff, Clock } from "lucide-react";
 import {
   deleteCapture,
   deleteGroup,
+  getCapture,
   getCapturesByGroup,
-  listCaptures,
-  type CaptureRecord,
+  listCaptureMeta,
+  type CaptureMeta,
 } from "@/storage/idb/capturesRepo";
 import { buildDownloadFilename } from "@/storage/downloadName";
 import { deleteHistoryEntry } from "@/storage/history/activityLog";
@@ -16,41 +17,24 @@ import CaptureCard from "./components/CaptureCard";
 const PAGE_SIZE = 24;
 
 export default function WorkspaceApp(): React.JSX.Element {
-  const [records, setRecords] = React.useState<CaptureRecord[]>([]);
-  const [urls, setUrls] = React.useState<Record<string, string>>({});
+  // Metadata only — blobs stay in IndexedDB until Open/Download/Thumbnail.
+  // The old code materialized every blob into the list, which is what made
+  // large libraries crawl before a single pixel was even painted.
+  const [records, setRecords] = React.useState<CaptureMeta[]>([]);
   const [query, setQuery] = React.useState("");
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [visibleCount, setVisibleCount] = React.useState(PAGE_SIZE);
-  // Mirror of `urls` for cleanup paths — revoked without setState.
-  const urlsRef = React.useRef<Record<string, string>>({});
+  // Deferred query: keystrokes stay instant while the grid filters a beat
+  // behind on huge libraries instead of blocking the input.
+  const deferredQuery = React.useDeferredValue(query);
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const list = await listCaptures(200);
+      const list = await listCaptureMeta(200);
       setRecords(list);
-      // Only thumbnail the group cover — full parts load on demand in the editor.
-      const covers = new Set(toGroups(list).map((g) => g.first.id));
-      for (const u of Object.values(urlsRef.current)) {
-        try {
-          URL.revokeObjectURL(u);
-        } catch {
-          // ignore
-        }
-      }
-      const next: Record<string, string> = {};
-      for (const r of list) {
-        if (!covers.has(r.id)) continue;
-        try {
-          next[r.id] = URL.createObjectURL(r.blob);
-        } catch {
-          // ignore single failures
-        }
-      }
-      urlsRef.current = next;
-      setUrls(next);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -60,22 +44,12 @@ export default function WorkspaceApp(): React.JSX.Element {
 
   React.useEffect(() => {
     void refresh();
-    return () => {
-      for (const u of Object.values(urlsRef.current)) {
-        try {
-          URL.revokeObjectURL(u);
-        } catch {
-          // ignore
-        }
-      }
-      urlsRef.current = {};
-    };
   }, [refresh]);
 
   const groups = React.useMemo(() => toGroups(records), [records]);
 
   const filtered = React.useMemo(() => {
-    const q = query.trim().toLowerCase();
+    const q = deferredQuery.trim().toLowerCase();
     if (!q) return groups;
     return groups.filter((g) => {
       const f = g.first;
@@ -86,116 +60,96 @@ export default function WorkspaceApp(): React.JSX.Element {
         (g.count > 1 && "parts".includes(q))
       );
     });
-  }, [groups, query]);
+  }, [groups, deferredQuery]);
 
   const shown = filtered.slice(0, visibleCount);
 
-  const openGroup = React.useCallback((g: Group) => {
+  const openGroup = React.useCallback((g: Group<CaptureMeta>) => {
     const url = g.count > 1 && g.first.groupId ? getGroupEditorUrl(g.first.groupId) : getEditorUrl(g.first.id);
     window.open(url, "_blank");
   }, []);
 
-  const downloadGroup = React.useCallback(
-    (g: Group) => {
-      // Reuse the cover URL for singles; groups download every part file.
-      const downloadOne = (record: CaptureRecord) => {
-        const url = urls[record.id];
-        if (!url) return;
+  const downloadBlob = React.useCallback(
+    (
+      blob: Blob,
+      opts: { sourceUrl?: string; type: CaptureMeta["type"]; createdAt: number; partIndex?: number; partTotal?: number }
+    ) => {
+      const tmp = URL.createObjectURL(blob);
+      try {
         const a = document.createElement("a");
-        a.href = url;
-        a.download = buildDownloadFilename({
-          sourceUrl: record.sourceUrl,
-          type: record.type,
-          createdAt: record.createdAt,
-          ext: "png",
-        });
+        a.href = tmp;
+        a.download = buildDownloadFilename({ ...opts, ext: "png" });
         document.body.appendChild(a);
         a.click();
         a.remove();
-      };
-      if (g.count === 1) {
-        downloadOne(g.first);
-        return;
+      } finally {
+        setTimeout(() => {
+          try {
+            URL.revokeObjectURL(tmp);
+          } catch {
+            // ignore
+          }
+        }, 30_000);
       }
-      // Parts beyond the cover need blob URLs — fetch records on demand.
+    },
+    []
+  );
+
+  const downloadGroup = React.useCallback(
+    (g: Group<CaptureMeta>) => {
+      // Blobs fetched on demand — the grid itself holds no full-res data.
       void (async () => {
         try {
+          if (g.count === 1) {
+            const rec = await getCapture(g.first.id);
+            if (!rec) throw new Error("Image no longer in storage.");
+            downloadBlob(rec.blob, {
+              sourceUrl: rec.sourceUrl,
+              type: rec.type,
+              createdAt: rec.createdAt,
+            });
+            return;
+          }
           const parts = await getCapturesByGroup(g.key);
-          const tmp: string[] = [];
           parts.forEach((p, i) => {
             try {
-              const u = URL.createObjectURL(p.blob);
-              tmp.push(u);
-              const a = document.createElement("a");
-              a.href = u;
-              a.download = buildDownloadFilename({
+              downloadBlob(p.blob, {
                 sourceUrl: p.sourceUrl,
                 type: p.type,
                 createdAt: p.createdAt,
                 partIndex: i + 1,
                 partTotal: parts.length,
-                ext: "png",
               });
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
             } catch {
               // ignore single failures
             }
           });
-          setTimeout(() => {
-            for (const u of tmp) {
-              try {
-                URL.revokeObjectURL(u);
-              } catch {
-                // ignore
-              }
-            }
-          }, 30_000);
-        } catch {
-          // fall back to cover only
-          downloadOne(g.first);
+        } catch (e) {
+          setError(e instanceof Error ? e.message : String(e));
         }
       })();
     },
-    [urls]
+    [downloadBlob]
   );
 
-  const removeGroup = React.useCallback(
-    async (g: Group) => {
+  const removeGroup = React.useCallback(async (g: Group<CaptureMeta>) => {
+    try {
+      if (g.count > 1) await deleteGroup(g.key);
+      else await deleteCapture(g.first.id);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      return;
+    }
+    // Image gone ⇒ its history line goes too (history never throws).
+    for (const id of g.ids) {
       try {
-        if (g.count > 1) await deleteGroup(g.key);
-        else await deleteCapture(g.first.id);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        return;
+        await deleteHistoryEntry(id);
+      } catch {
+        // ignore — best-effort
       }
-      // Image gone ⇒ its history line goes too (history never throws).
-      for (const id of g.ids) {
-        try {
-          await deleteHistoryEntry(id);
-        } catch {
-          // ignore — best-effort
-        }
-      }
-      setRecords((prev) => prev.filter((r) => !g.ids.includes(r.id)));
-      const next = { ...urlsRef.current };
-      for (const id of g.ids) {
-        const u = next[id];
-        if (u) {
-          try {
-            URL.revokeObjectURL(u);
-          } catch {
-            // ignore
-          }
-          delete next[id];
-        }
-      }
-      urlsRef.current = next;
-      setUrls(next);
-    },
-    []
-  );
+    }
+    setRecords((prev) => prev.filter((r) => !g.ids.includes(r.id)));
+  }, []);
 
   const totalImages = records.length;
 
@@ -274,42 +228,15 @@ export default function WorkspaceApp(): React.JSX.Element {
         {!loading && !error && shown.length > 0 && (
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-              {shown.map((g) =>
-                urls[g.first.id] ? (
-                  <CaptureCard
-                    key={g.key}
-                    record={g.first}
-                    objectUrl={urls[g.first.id]!}
-                    partCount={g.count > 1 ? g.count : undefined}
-                    onOpen={() => openGroup(g)}
-                    onDownload={() => downloadGroup(g)}
-                    onDelete={() => void removeGroup(g)}
-                  />
-                ) : (
-                  <div
-                    key={g.key}
-                    className="flex flex-col items-center justify-center gap-2 border-[3px] border-black bg-[#F87171] px-4 py-10 text-center shadow-[4px_4px_0_#000]"
-                  >
-                    <p className="text-xs font-bold">Preview failed to load</p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const rec = records.find((r) => r.id === g.first.id);
-                        if (!rec) return;
-                        try {
-                          const url = URL.createObjectURL(rec.blob);
-                          setUrls((prev) => ({ ...prev, [rec.id]: url }));
-                        } catch {
-                          setError("Couldn't preview this image.");
-                        }
-                      }}
-                      className="cursor-pointer border-2 border-black bg-white px-3 py-1.5 text-xs font-bold shadow-[2px_2px_0_#000] transition-all duration-100 hover:translate-x-[-1px] hover:translate-y-[-1px] hover:shadow-[3px_3px_0_#000] active:translate-x-[1px] active:translate-y-[1px] active:shadow-none"
-                    >
-                      Retry preview
-                    </button>
-                  </div>
-                )
-              )}
+              {shown.map((g) => (
+                <CaptureCard
+                  key={g.key}
+                  group={g}
+                  onOpen={openGroup}
+                  onDownload={downloadGroup}
+                  onDelete={removeGroup}
+                />
+              ))}
             </div>
             {visibleCount < filtered.length && (
               <div className="mt-6 text-center">

@@ -2,10 +2,13 @@
  * Segment planner — auto-split oversized captures into saveable parts
  * (plan: capture/planner/segments.ts).
  *
- * A single canvas cannot exceed 65,535px height / 268MP area. Instead of
- * failing (or silently clamping away content), tall captures split into N
- * vertical parts, each stitched separately from the SAME chunks via the
- * CanvasStitcher selection mode. No re-scrolling, no re-capture.
+ * A single canvas cannot exceed 32767px per side / 268MP area (Chrome's real
+ * limit — not 65535). Instead of failing (or silently clamping away content),
+ * tall captures split into N vertical parts, each stitched separately from
+ * the SAME chunks via the CanvasStitcher selection mode. No re-scrolling,
+ * no re-capture. NOTE: the parts are stored separately precisely because
+ * their STACKED total may still exceed one canvas — stacking them back into
+ * a single file can remain impossible (see editor export pre-check).
  */
 import { CaptureError } from "@/types/capture";
 import { MAX_CANVAS_HEIGHT, MAX_CANVAS_PIXELS, MAX_TOTAL_HEIGHT } from "../stitch/limits";

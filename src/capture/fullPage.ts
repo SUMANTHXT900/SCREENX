@@ -2,7 +2,7 @@ import { CaptureError, type CaptureResult } from "@/types";
 import type { MeasureResponse } from "@/messaging/events";
 import { stitchImages } from "./stitch";
 import { createStitcher } from "./stitch/canvasStitcher";
-import { MAX_TOTAL_HEIGHT, HUD_RESERVE_PX } from "./stitch/limits";
+import { MAX_TOTAL_HEIGHT } from "./stitch/limits";
 import { ensureContentScript } from "./client/ensureContent";
 import { sendProgress, sendToContent } from "./client/contentBridge";
 import { isRestrictedUrl, queryActiveTab, withTimeout } from "./captureUtils";
@@ -11,6 +11,7 @@ import { planFullPagePositions } from "./planner/fullPagePlan";
 import { computeFullPageOcclusion } from "./planner/occlusion";
 import { MAX_PARTS, planSegments } from "./planner/segments";
 import { executeCaptureLoop } from "./engine/captureLoop";
+import { hideStickyBarsForCapture } from "./client/stickyBars";
 import { globalSession } from "./engine/CaptureSession";
 import { acquireGlobalLock, heartbeatGlobalLock, releaseGlobalLock } from "./engine/globalLock";
 import {
@@ -36,6 +37,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
   globalSession.acquire();
   let tab: chrome.tabs.Tab | null = null;
   let prepared = false;
+  let stickyHidden = false;
   let lockToken: string | null = null;
 
   try {
@@ -84,9 +86,11 @@ export async function captureFullPage(): Promise<CaptureResult> {
     }
 
     const occlusion = computeFullPageOcclusion(metrics.fixedElements, viewportWidth, viewportHeight);
-    // Constant-HUD contract: the reserve band covers the always-visible HUD,
-    // so the surviving trim is whichever is larger (real bars or HUD).
-    const occludedTopHeight = Math.max(occlusion.top, HUD_RESERVE_PX);
+    // Robust-HUD contract: the capture loop hides the progress HUD for EVERY
+    // exposure, so no reserve band is trimmed. Trimming a fixed band deletes
+    // live rows whenever the HUD renders shorter than the reserve — the
+    // classic cut-text seam. Only real measured bars are trimmed.
+    const occludedTopHeight = occlusion.top;
     const occludedBottomHeight = occlusion.bottom;
 
     // Check for nested scroll container that would make capture incorrect
@@ -101,9 +105,17 @@ export async function captureFullPage(): Promise<CaptureResult> {
     );
     prepared = true;
 
-    // NOTE: nothing on the page is hidden or modified for capture (beyond the
-    // animation-freeze stylesheet). Fixed/sticky bars are handled purely by
-    // occlusion-aware overlap in the planner + stitcher.
+    // Multi-strip passes hide tiny floating widgets (chat bubbles, FABs)
+    // that would otherwise repeat in every strip. Bars/headers/sections are
+    // NEVER hidden (capture-as-is: hiding a sticky ancestor deletes its whole
+    // subtree from every strip). Measured fixed top/bottom bars are still
+    // removed via occlusion TRIMS regardless of hiding — the hider only ever
+    // takes unmeasurable widgets now, so trims must stand. Single-shot
+    // captures skip hiding so the shot looks exactly like the screen.
+    if (totalHeight > viewportHeight) {
+      const hide = await hideStickyBarsForCapture(tab.id);
+      stickyHidden = hide.active;
+    }
 
     // Calculate positions using shared planner (allowing up to 300 viewports with adaptive stepping)
     const positions = planFullPagePositions(totalHeight, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
@@ -140,6 +152,16 @@ export async function captureFullPage(): Promise<CaptureResult> {
     });
 
     const chunks = loopResult.chunks;
+    // If scrolling stalled because the page collapsed or its real end moved,
+    // don't export a canvas padded with white rows up to the stale measurement.
+    // The last settled viewport is the only trustworthy end bound available.
+    const capturedHeight =
+      loopResult.stoppedEarly && chunks.length > 0
+        ? Math.min(totalHeight, Math.max(viewportHeight, chunks[chunks.length - 1]!.y + viewportHeight))
+        : totalHeight;
+    if (loopResult.stoppedEarly) {
+      console.warn("[ScreenX] exporting the settled partial page extent", JSON.stringify({ measuredHeight: totalHeight, capturedHeight }));
+    }
 
     // Unscrollable-but-tall trap: maxScrollY 0 with content taller than the
     // viewport (overflow-hidden containers) collapses to one chunk that the
@@ -160,7 +182,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
     });
 
     // Oversized pages auto-split into canvas-safe parts stitched from the same chunks.
-    const segments = planSegments(totalWidth, 0, totalHeight, dpr || 1);
+    const segments = planSegments(totalWidth, 0, capturedHeight, dpr || 1);
     const groupId = segments.length > 1 ? crypto.randomUUID() : undefined;
 
     const parts: CaptureResult[] = [];
@@ -170,7 +192,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
         stitched = await stitchImages({
           chunks,
           totalWidth,
-          totalHeight,
+          totalHeight: capturedHeight,
           viewportWidth,
           viewportHeight,
           dpr: dpr || 1,
@@ -254,7 +276,7 @@ export async function captureFullPage(): Promise<CaptureResult> {
     // successor must not PREPARE while our retried RESTORE is still in flight.
     // Releases are finally-nested + individually guarded against leaks.
     try {
-      await finalizeCapture(tab?.id, prepared);
+      await finalizeCapture(tab?.id, prepared, stickyHidden);
     } finally {
       try {
         if (lockToken) await releaseGlobalLock(lockToken);

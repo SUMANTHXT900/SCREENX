@@ -6,7 +6,7 @@ import {
   MAX_CHUNKS,
   MAX_TOTAL_HEIGHT,
 } from "./limits";
-import { ALIGN_BAND, ALIGN_SEARCH, findBestAlignment } from "./coordinateMath";
+import { ALIGN_BAND, ALIGN_SEARCH, findBestAlignment, measureSeamFade } from "./coordinateMath";
 import type { RangeSelection } from "@/messaging/events";
 
 // RangeSelection is single-sourced in @/messaging/events; re-exported here for compat.
@@ -78,6 +78,34 @@ export function createStitcher(options: CanvasStitcherOptions): Stitcher {
 
 type Ctx2D = CanvasRenderingContext2D;
 
+/** Read bandH rows of a strip starting at (srcX, srcY) into plain pixels. Null on any failure. */
+function readStripBand(
+  bmp: ImageBitmap,
+  srcX: number,
+  srcY: number,
+  srcW: number,
+  bandH: number
+): { data: Uint8ClampedArray; width: number; height: number } | null {
+  try {
+    if (srcW <= 0 || bandH <= 0) return null;
+    const scratch = typeof OffscreenCanvas !== "undefined"
+      ? new OffscreenCanvas(srcW, bandH)
+      : (() => {
+          const el = document.createElement("canvas");
+          el.width = srcW;
+          el.height = bandH;
+          return el as unknown as OffscreenCanvas;
+        })();
+    const sctx = (scratch as OffscreenCanvas).getContext("2d") as unknown as Ctx2D | null;
+    if (!sctx) return null;
+    sctx.drawImage(bmp as unknown as CanvasImageSource, srcX, srcY, srcW, bandH, 0, 0, srcW, bandH);
+    const pixels = sctx.getImageData(0, 0, srcW, bandH);
+    return { data: pixels.data, width: srcW, height: bandH };
+  } catch {
+    return null;
+  }
+}
+
 /** 2d context with readback hint; null when unavailable (alignment is skipped). */
 function getReadableContext(canvas: OffscreenCanvas): Ctx2D | null {
   try {
@@ -96,8 +124,9 @@ function getReadableContext(canvas: OffscreenCanvas): Ctx2D | null {
 
 /**
  * Nudge a slice's destination Y so its top band matches the already-drawn
- * canvas. Returns the (possibly unchanged) Y. Never throws — any readback
- * failure falls back to scroll math.
+ * canvas. Returns { y, matched }: matched=false means the answer is scroll
+ * math (blank band or poor match), which adaptive-trim must not trust.
+ * Never throws — any readback failure falls back to scroll math.
  */
 function alignSliceToCanvas(
   ctx: Ctx2D,
@@ -110,26 +139,17 @@ function alignSliceToCanvas(
   expectedDstY: number,
   canvasWidth: number,
   canvasHeight: number
-): number {
+): { y: number; matched: boolean } {
   try {
-    if (srcW <= 0 || srcH <= 0) return expectedDstY;
+    if (srcW <= 0 || srcH <= 0) return { y: expectedDstY, matched: false };
     const bandH = Math.min(ALIGN_BAND, srcH);
-    const scratch = typeof OffscreenCanvas !== "undefined"
-      ? new OffscreenCanvas(srcW, bandH)
-      : (() => {
-          const el = document.createElement("canvas");
-          el.width = srcW;
-          el.height = bandH;
-          return el as unknown as OffscreenCanvas;
-        })();
-    const sctx = (scratch as OffscreenCanvas).getContext("2d") as unknown as Ctx2D | null;
-    if (!sctx) return expectedDstY;
-    sctx.drawImage(bmp as unknown as CanvasImageSource, srcX, srcY, srcW, bandH, 0, 0, srcW, bandH);
-    const bandPixels = sctx.getImageData(0, 0, srcW, bandH);
+    const band = readStripBand(bmp, srcX, srcY, srcW, bandH);
+    if (!band) return { y: expectedDstY, matched: false };
+    const bandPixels = { data: band.data, width: band.width, height: band.height };
 
     const regionTop = Math.max(0, expectedDstY - ALIGN_SEARCH);
     const regionBottom = Math.min(canvasHeight, expectedDstY + ALIGN_SEARCH + bandH);
-    if (regionBottom - regionTop < bandH || dstX + srcW > canvasWidth) return expectedDstY;
+    if (regionBottom - regionTop < bandH || dstX + srcW > canvasWidth) return { y: expectedDstY, matched: false };
     const regionPixels = ctx.getImageData(dstX, regionTop, srcW, regionBottom - regionTop);
 
     const found = findBestAlignment(
@@ -138,9 +158,9 @@ function alignSliceToCanvas(
       regionTop,
       expectedDstY
     );
-    return found.matched ? found.y : expectedDstY;
+    return found.matched ? { y: found.y, matched: true } : { y: expectedDstY, matched: false };
   } catch {
-    return expectedDstY;
+    return { y: expectedDstY, matched: false };
   }
 }
 
@@ -337,11 +357,29 @@ export class CanvasStitcher implements Stitcher {
 
     let coveredDocY = this.targetY;
     const targetEndY = this.targetY + this.targetHeight;
+    // Canvas scale is authoritative for destinations; per-chunk bitmap scales
+    // are authoritative for sources. Decoupling them (with resampling on
+    // draw) absorbs fractional-DPR / zoom rounding where bmpScale != dpr —
+    // the systematic ±1px-per-seam drift that tore long pages.
+    const canvasScaleX = finalWidth / this.targetWidth;
+    const canvasScaleY = finalHeight / this.targetHeight;
     // Pixel-drift carried across seams: each alignment correction shifts all
     // later strips, instead of being rediscovered at every seam. Clamped to
     // ±ALIGN_SEARCH — one false match on repeating content (tables, code)
     // must not displace the entire rest of the page.
     let drift = 0;
+    // Adaptive fade trim: every MATCHED seam re-measures the page's real
+    // edge-fade depth and shrinks later strips' trims to fit (only ever
+    // shrinks — a cautious fixed guess deletes live rows on pages that fade
+    // nothing). Until measured, the planner's occlusion trims apply.
+    let effOccTop = this.occludedTopHeight;
+    let effOccBottom = this.occludedBottomHeight;
+    // Previous strip's drawn span (canvas-local), for fade + overlap-clip.
+    let prevDstY = 0;
+    let prevDrawH = 0;
+    let healedDocPx = 0;
+    let clippedPx = 0;
+    let gapDocPx = 0;
 
     for (let i = 0; i < this.chunks.length; i++) {
       const chunk = this.chunks[i]!;
@@ -355,25 +393,56 @@ export class CanvasStitcher implements Stitcher {
       const rectTop = chunk.ry ?? 0;
       const isLastChunk = i === this.chunks.length - 1;
 
-      const safeTop = (vpY === 0) ? vpY : vpY + this.occludedTopHeight;
+      const safeTop = (vpY === 0) ? vpY : vpY + effOccTop;
       // Final chunk: extend to the target end instead of trimming the bottom
       // occlusion. Those rows are photographed in no other chunk — trimming
       // them leaves a permanent white tail exactly occludedBottomHeight tall.
       // (A fixed bottom bar may show at the very end; a gap is worse.)
       const safeBottom = isLastChunk
         ? Math.min(vpY + vpH, targetEndY)
-        : vpY + vpH - this.occludedBottomHeight;
+        : vpY + vpH - effOccBottom;
 
-      const sliceDocTop = Math.max(safeTop, coveredDocY, this.targetY);
+      // Retain the deliberate viewport overlap for pixel alignment, then heal
+      // doc-space gaps BEFORE sampling: if the scroll jumped further than the
+      // planned step (lazy layout shift, over-trim, clamped maxScrollY), the
+      // rows between coveredDocY and safeTop exist in THIS bitmap's trimmed
+      // band — pulling them back beats leaving a white seam. Heal is bounded
+      // by the bitmap top (vpY) so it never invents pixels.
+      let sliceDocTop = Math.max(safeTop, this.targetY);
       const sliceDocBottom = Math.min(safeBottom, targetEndY);
 
       if (sliceDocBottom <= sliceDocTop) continue;
+      if (sliceDocTop > coveredDocY && coveredDocY > this.targetY) {
+        const gap = sliceDocTop - coveredDocY;
+        // Only heal plausible seam gaps (not a genuinely missing viewport).
+        if (gap > 0 && gap <= vpH) {
+          const availableAbove = sliceDocTop - vpY;
+          const heal = Math.min(gap, Math.max(0, availableAbove));
+          if (heal > 0) {
+            sliceDocTop -= heal;
+            healedDocPx += heal;
+          } else {
+            gapDocPx += gap;
+          }
+        } else {
+          gapDocPx += gap;
+        }
+      }
 
       let bmp: ImageBitmap | null = null;
       try {
         bmp = await this.loadBitmap(chunk.dataUrl);
         const scaleX = bmp.width / vpW;
         const scaleY = bmp.height / vpH;
+        // Bitmap scale must match the canvas scale; a >2% deviation means
+        // zoom/resize mid-run or a throttled capture — warn loudly, then
+        // resample through canvasScale so the seam still lands gapless.
+        if (Math.abs(scaleX - canvasScaleX) / canvasScaleX > 0.02 ||
+            Math.abs(scaleY - canvasScaleY) / canvasScaleY > 0.02) {
+          console.warn("[ScreenX] bitmap scale drift",
+            JSON.stringify({ chunk: i, bmpW: bmp.width, bmpH: bmp.height, vpW, vpH, scaleX, scaleY, canvasScaleX, canvasScaleY }));
+        }
+        const scaleYForTrim = scaleY > 0 ? scaleY : canvasScaleY;
 
         const sliceDocLeft = Math.max(vpX, this.targetX);
         const sliceDocRight = Math.min(vpX + vpW, this.targetX + this.targetWidth);
@@ -391,19 +460,21 @@ export class CanvasStitcher implements Stitcher {
         const globalVpY = Math.round((rectTop + vpY) * scaleY);
 
         const srcX = Math.max(0, globalLeft - globalVpX);
-        const srcY = Math.max(0, globalTop - globalVpY);
+        let srcY = Math.max(0, globalTop - globalVpY);
         const srcW = Math.min(bmp.width - srcX, globalRight - globalLeft);
-        const srcH = Math.min(bmp.height - srcY, globalBottom - globalTop);
+        let srcH = Math.min(bmp.height - srcY, globalBottom - globalTop);
 
-        // Destination relative to the target origin (not differenced rounded
-        // absolutes) so spans always match the canvas at fractional DPR.
-        const dstX = Math.round((sliceDocLeft - this.targetX) * scaleX);
-        const dstW = srcW;
-        const dstH = srcH;
+        // Destinations use the CANVAS scale (target-relative, not differenced
+        // rounded absolutes) so spans match the canvas at fractional DPR even
+        // when a bitmap rounded to a different size. drawImage resamples the
+        // small delta — no accumulated ±1px drift.
+        const dstX = Math.round((sliceDocLeft - this.targetX) * canvasScaleX);
+        let dstW = Math.round((sliceDocRight - sliceDocLeft) * canvasScaleX);
+        let dstH = Math.round((sliceDocBottom - sliceDocTop) * canvasScaleY);
         // Scroll math predicts dstY; the page may have shifted, so verify
         // against actual pixels (first strip is trusted as the anchor).
-        // dstY is target-relative (matches the canvas exactly at any DPR).
-        let dstY = Math.round((sliceDocTop - this.targetY) * scaleY) + drift;
+        let dstY = Math.round((sliceDocTop - this.targetY) * canvasScaleY) + drift;
+        let stripMatched = false;
         if (i > 0) {
           const aligned = alignSliceToCanvas(
             ctx as unknown as CanvasRenderingContext2D,
@@ -417,16 +488,96 @@ export class CanvasStitcher implements Stitcher {
             finalWidth,
             finalHeight
           );
-          if (aligned !== dstY) {
-            drift += aligned - dstY;
+          stripMatched = aligned.matched;
+          if (aligned.y !== dstY) {
+            drift += aligned.y - dstY;
             // One false match on repeating content must not displace the rest
             // of the page: clamp the carried correction to the search window.
             if (drift > ALIGN_SEARCH) drift = ALIGN_SEARCH;
             else if (drift < -ALIGN_SEARCH) drift = -ALIGN_SEARCH;
-            dstY = aligned;
+            dstY = aligned.y;
           }
         }
         dstY = Math.max(0, Math.min(dstY, Math.max(0, finalHeight - dstH)));
+
+        // Measure BEFORE drawing the new strip, at EVERY matched seam (not
+        // just the first). Once drawImage overwrites the overlap, the canvas
+        // no longer holds the crisp previous copy and fade reads as zero.
+        // Shrink-only: trims never grow, so a late fade can't delete rows.
+        if (i > 0 && stripMatched && prevDrawH > 0 && (effOccTop > 0 || effOccBottom > 0)) {
+          try {
+            const prevBottom = prevDstY + prevDrawH;
+            const probePx = Math.max(8, Math.min(96, Math.floor(Math.min(srcH, prevDrawH) / 4)));
+            const head = readStripBand(bmp, srcX, srcY, srcW, probePx);
+            const regionTop = Math.max(0, Math.min(dstY, prevBottom - probePx));
+            const regionBottom = Math.min(finalHeight, Math.max(dstY + probePx, prevBottom));
+            if (head && regionBottom - regionTop >= probePx) {
+              const regionPixels = (ctx as unknown as CanvasRenderingContext2D).getImageData(
+                dstX, regionTop, srcW, regionBottom - regionTop
+              );
+              const fades = measureSeamFade(
+                { data: head.data, width: head.width, height: head.height },
+                { data: regionPixels.data, width: srcW, height: regionBottom - regionTop },
+                regionTop,
+                dstY,
+                prevDstY,
+                prevBottom,
+                probePx
+              );
+              if (fades) {
+                effOccTop = Math.min(effOccTop, fades.top / scaleYForTrim + 6);
+                effOccBottom = Math.min(effOccBottom, fades.bottom / scaleYForTrim + 6);
+                if (i === 1) {
+                  console.debug("[ScreenX] measured page fade",
+                    JSON.stringify({ topPx: fades.top, bottomPx: fades.bottom, trimTop: effOccTop, trimBottom: effOccBottom }));
+                }
+              }
+            }
+          } catch {
+            // ignore — measurement is opportunistic; cautious trims stand
+          }
+        }
+
+        // Novel-only draw: clip rows the previous strip already painted.
+        // Overwriting the overlap with a 1px-misaligned copy is what ghosts
+        // text (double lines) at every seam; skipping it makes seams invisible
+        // even when alignment is off by a pixel. Proportional clip keeps
+        // src/dst in sync when bitmap and canvas scales differ.
+        if (i > 0 && prevDrawH > 0) {
+          const prevBottom = prevDstY + prevDrawH;
+          if (dstY < prevBottom) {
+            const overlap = prevBottom - dstY;
+            if (overlap < dstH) {
+              const srcClip = Math.round((overlap * srcH) / dstH);
+              if (srcClip > 0 && srcClip < srcH) {
+                srcY += srcClip;
+                srcH -= srcClip;
+                dstY = prevBottom;
+                dstH -= overlap;
+                dstW = Math.min(dstW, srcW);
+                clippedPx += overlap;
+              }
+            } else {
+              // Fully covered (stalled scroll duplicate) — skip the strip.
+              bmp.close();
+              await new Promise<void>((r) => setTimeout(r, 0));
+              continue;
+            }
+          } else if (dstY > prevBottom && !stripMatched) {
+            // Untrusted scroll math left a small white gap; butt-joint rather
+            // than leave a hairline through text. Matched seams keep their
+            // measured position (a real gap there means missing content).
+            const gapPx = dstY - prevBottom;
+            if (gapPx > 0 && gapPx <= 64) {
+              dstY = prevBottom;
+            }
+          }
+        }
+        if (srcW <= 0 || srcH <= 0 || dstW <= 0 || dstH <= 0) {
+          bmp.close();
+          await new Promise<void>((r) => setTimeout(r, 0));
+          continue;
+        }
 
         (ctx as unknown as CanvasRenderingContext2D).drawImage(
           bmp as unknown as CanvasImageSource,
@@ -440,7 +591,10 @@ export class CanvasStitcher implements Stitcher {
           dstH
         );
 
-        coveredDocY = sliceDocBottom;
+        prevDstY = dstY;
+        prevDrawH = dstH;
+
+        coveredDocY = Math.max(coveredDocY, sliceDocBottom);
       } catch (e) {
         try {
           bmp?.close();
@@ -455,8 +609,14 @@ export class CanvasStitcher implements Stitcher {
       await new Promise<void>((r) => setTimeout(r, 0));
     }
 
-    if (!this.isFullPage && coveredDocY < targetEndY - 2) {
-      console.warn("[ScreenX][SelectedArea] Stitch warning: coveredDocY did not fully reach selEndY", JSON.stringify({ coveredDocY, selEndY: targetEndY, gap: targetEndY - coveredDocY }));
+    if (coveredDocY < targetEndY - 2) {
+      const gap = targetEndY - coveredDocY;
+      const label = this.isFullPage ? "[ScreenX] Stitch warning: coveredDocY did not reach page end" : "[ScreenX][SelectedArea] Stitch warning: coveredDocY did not fully reach selEndY";
+      console.warn(label, JSON.stringify(this.isFullPage
+        ? { coveredDocY, pageEndY: targetEndY, gap, healedDocPx, clippedPx, gapDocPx }
+        : { coveredDocY, selEndY: targetEndY, gap, healedDocPx, clippedPx, gapDocPx }));
+    } else if (healedDocPx > 0 || gapDocPx > 0) {
+      console.debug("[ScreenX] stitch seam stats", JSON.stringify({ healedDocPx, clippedPx, gapDocPx, chunks: this.chunks.length }));
     }
 
     try {

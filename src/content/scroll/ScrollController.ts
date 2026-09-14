@@ -45,14 +45,27 @@ export function createWindowScrollController(): ScrollController {
   };
 }
 
+/** Walk document + open shadow roots; querySelectorAll(document) misses shadow DOM panes. */
+function collectElementsDeep(root: Document | ShadowRoot, out: HTMLElement[] = [], seen = new Set<ShadowRoot>()): HTMLElement[] {
+  for (const node of Array.from(root.querySelectorAll("*"))) {
+    if (node instanceof HTMLElement) out.push(node);
+    const shadow = node.shadowRoot;
+    if (shadow && !seen.has(shadow)) {
+      seen.add(shadow);
+      collectElementsDeep(shadow, out, seen);
+    }
+  }
+  return out;
+}
+
 export function findElementScrollController(): ScrollController | null {
-  const candidates = Array.from(document.querySelectorAll("*")) as HTMLElement[];
+  const candidates = collectElementsDeep(document);
   let best: HTMLElement | null = null;
   let bestScore = 0;
   for (const el of candidates) {
-    // Cheap layout-only prefilter first: scrollHeight/clientHeight don't force
-    // a style recalc, getComputedStyle does. Skip the rect until overflow passes.
-    if (el.scrollHeight - el.clientHeight <= 100) continue;
+    // A 4px threshold admits short real panes while filtering subpixel/layout
+    // noise. The point-based selector uses the same contract below.
+    if (el.scrollHeight - el.clientHeight <= 4) continue;
     if (el.clientHeight <= window.innerHeight * 0.4) continue;
     const style = getComputedStyle(el);
     const overflowY = style.overflowY;
@@ -69,7 +82,7 @@ export function findElementScrollController(): ScrollController | null {
     }
   }
 
-  if (best && bestScore > 200) {
+  if (best && bestScore > 4) {
     return {
       element: best,
       getScrollTop: () => best!.scrollTop,

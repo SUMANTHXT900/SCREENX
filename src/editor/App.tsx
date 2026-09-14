@@ -13,7 +13,7 @@ import { useSettingsStore } from "@/state/useSettingsStore";
 import Toolbar from "./components/Toolbar";
 import CanvasViewport, { type Zoom } from "./components/CanvasViewport";
 import ExportModal from "./components/ExportModal";
-import { loadImage, offsetShapes, renderComposite, renderStackedComposite, canvasToBlob } from "./export/composite";
+import { loadImage, offsetShapes, renderComposite, renderStackedComposite, renderStackedCompositeScaled, fitScaleForLimits, encodeFullResStackedPNG, canvasToBlob } from "./export/composite";
 import { MAX_CANVAS_HEIGHT, MAX_CANVAS_PIXELS, MAX_CANVAS_WIDTH } from "@/capture/stitch/limits";
 
 type LoadState = "loading" | "empty" | "ready" | "error";
@@ -73,10 +73,12 @@ interface AnnotationsDraft {
 function assertExportSize(w: number, h: number, multi: boolean): void {
   if (!(w > 0 && h > 0)) throw new Error("Image has no pixels to export.");
   if (w > MAX_CANVAS_WIDTH || h > MAX_CANVAS_HEIGHT || w * h > MAX_CANVAS_PIXELS) {
+    const mp = Math.round((w * h) / 1_000_000);
     const err = new Error(
-      `Export is ${w}×${h}px, past browser canvas limits (${MAX_CANVAS_WIDTH}px per side, ${Math.round(MAX_CANVAS_PIXELS / 1_000_000)}MP total). ` +
+      `Single-file export is ${w}×${h}px (${mp}MP) — past the browser canvas limit ` +
+        `(${MAX_CANVAS_WIDTH}px per side, ${Math.round(MAX_CANVAS_PIXELS / 1_000_000)}MP total). ` +
         (multi
-          ? "Download the parts individually instead."
+          ? "The parts are saved separately and each opens fine on its own."
           : "Crop to a smaller region first.")
     );
     err.name = "CanvasLimitError";
@@ -94,6 +96,13 @@ export default function EditorApp(): React.JSX.Element {
   const [exportOpen, setExportOpen] = React.useState(false);
   const [exportBusy, setExportBusy] = React.useState(false);
   const [exportError, setExportError] = React.useState<string | null>(null);
+  // True once we know the stacked total can't fit one canvas: the primary
+  // Download button is then disabled and the parts button is emphasized, so
+  // the user isn't invited to click something guaranteed to fail.
+  const [singleBlocked, setSingleBlocked] = React.useState(false);
+  // Stacked full-size total (physical px) measured when the dialog opens —
+  // drives the scaled single-file fallback label (e.g. 81% → 2079×32700).
+  const [stackedSize, setStackedSize] = React.useState<{ w: number; h: number } | null>(null);
   const [copied, setCopied] = React.useState(false);
   const copiedTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   // Shown when the requested captureId missed and the latest was opened.
@@ -433,6 +442,59 @@ export default function EditorApp(): React.JSX.Element {
     });
   }, [parts, fileBase]);
 
+  // Pre-check on dialog open: decode headers to learn the STACKED total before
+  // the user clicks Download. If one file can't fit, say so upfront and block
+  // the primary button instead of failing after the click (then auto-falling
+  // back to parts, which reads as an error).
+  React.useEffect(() => {
+    if (!exportOpen || parts.length <= 1) {
+      if (!exportOpen) {
+        setSingleBlocked(false);
+        setStackedSize(null);
+      }
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const sizes = await Promise.all(
+          parts.map(
+            (p) =>
+              new Promise<{ w: number; h: number }>((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => resolve({ w: img.naturalWidth, h: img.naturalHeight });
+                img.onerror = () => reject(new Error("decode failed"));
+                img.src = p.url;
+              })
+          )
+        );
+        if (cancelled) return;
+        const w = Math.max(...sizes.map((s) => s.w));
+        const h = sizes.reduce((n, s) => n + s.h, 0);
+        setStackedSize({ w, h });
+        try {
+          assertExportSize(w, h, true);
+          setSingleBlocked(false);
+        } catch (e) {
+          if (e instanceof Error && e.name === "CanvasLimitError") {
+            setSingleBlocked(true);
+            const fit = fitScaleForLimits(w, h);
+            const pct = Math.round(fit.scale * 100);
+            setExportError(
+              `${e.message} Take the whole page below as one PNG at 100% full resolution, ` +
+                `or parts individually at full resolution — or a scaled ${fit.width}×${fit.height}px single file (${pct}%).`
+            );
+          }
+        }
+      } catch {
+        // ignore — download-time decode names the failing part precisely
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [exportOpen, parts]);
+
   const doDownload = React.useCallback(async () => {
     setExportBusy(true);
     setExportError(null);
@@ -459,6 +521,7 @@ export default function EditorApp(): React.JSX.Element {
     } catch (e) {
       if (e instanceof Error && e.name === "CanvasLimitError" && parts.length > 1) {
         downloadPartsIndividually();
+        setSingleBlocked(true);
         setExportError(`${e.message} Downloaded the ${parts.length} parts individually instead.`);
       } else {
         setExportError(
@@ -471,6 +534,104 @@ export default function EditorApp(): React.JSX.Element {
       setExportBusy(false);
     }
   }, [renderForExport, fileBase, parts.length, downloadPartsIndividually]);
+
+  // Scaled single-file fallback: the whole stack in ONE image, shrunk just
+  // enough to fit canvas limits. Never allocates the impossible full-size
+  // canvas — parts stream directly into the fit-size bitmap.
+  const scaledInfo = singleBlocked && stackedSize
+    ? (() => {
+        const fit = fitScaleForLimits(stackedSize.w, stackedSize.h);
+        return { ...fit, pct: Math.round(fit.scale * 100) };
+      })()
+    : null;
+
+  const doDownloadScaled = React.useCallback(async () => {
+    if (parts.length <= 1 || !stackedSize) return;
+    setExportBusy(true);
+    setExportError(null);
+    try {
+      const { exportFormat, exportQuality } = useSettingsStore.getState();
+      const fit = fitScaleForLimits(stackedSize.w, stackedSize.h);
+      const imgs: HTMLImageElement[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        try {
+          imgs.push(await loadImage(parts[i]!.url));
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          throw new Error(`Part ${i + 1}/${parts.length} failed to decode: ${detail}`);
+        }
+      }
+      const canvas = renderStackedCompositeScaled(
+        imgs,
+        useEditorStore.getState().shapes,
+        fit.scale,
+        exportFormat === "png" ? null : "#ffffff"
+      );
+      const blob = await canvasToBlob(canvas, exportFormat, exportQuality);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileBase}-full-${fit.width}x${fit.height}.${exportFormat === "jpeg" ? "jpg" : exportFormat}`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }, 10_000);
+      setExportOpen(false);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExportBusy(false);
+    }
+  }, [parts, stackedSize, fileBase]);
+
+  // Full-resolution single PNG: bypasses the canvas limit entirely by
+  // streaming rows straight into a PNG file — 100% quality, no downscale.
+  // PNG-only (JPEG/WebP have no manual encoder); annotations included.
+  const doDownloadFullRes = React.useCallback(async () => {
+    if (parts.length === 0) return;
+    setExportBusy(true);
+    setExportError(null);
+    try {
+      const imgs: HTMLImageElement[] = [];
+      for (let i = 0; i < parts.length; i++) {
+        try {
+          imgs.push(await loadImage(parts[i]!.url));
+        } catch (e) {
+          const detail = e instanceof Error ? e.message : String(e);
+          throw new Error(`Part ${i + 1}/${parts.length} failed to decode: ${detail}`);
+        }
+      }
+      const w = Math.max(...imgs.map((im) => im.naturalWidth));
+      const h = imgs.reduce((n, im) => n + im.naturalHeight, 0);
+      setExportError(`Stitching full-resolution PNG (${w}×${h}px)…`);
+      const blob = await encodeFullResStackedPNG(imgs, useEditorStore.getState().shapes, null);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${fileBase}-full-${w}x${h}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => {
+        try {
+          URL.revokeObjectURL(url);
+        } catch {
+          // ignore
+        }
+      }, 10_000);
+      setExportOpen(false);
+    } catch (e) {
+      setExportError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setExportBusy(false);
+    }
+  }, [parts, fileBase]);
 
   const doCopy = React.useCallback(async () => {
     try {
@@ -800,7 +961,13 @@ export default function EditorApp(): React.JSX.Element {
                 </span>
               </div>
               <span className="font-mono text-[10px] tracking-wide text-black/60">
-                {multiPart ? `${parts.length} parts stacked` : `id ${capture.id.slice(0, 8)}`} • {capture.type} • {capture.width ? `${capture.width}×${capture.height}` : "image"}
+                {multiPart
+                  // NOTE: capture.width×height here is only part 1's size —
+                  // showing it as the total misled users (e.g. 2561×32766 for
+                  // a 40367px-tall stack). For groups show the count + per-part
+                  // note; the true stacked total is measured at export time.
+                  ? `${parts.length} parts stored separately`
+                  : `id ${capture.id.slice(0, 8)}`} • {capture.type}{!multiPart && capture.width ? ` • ${capture.width}×${capture.height}` : ""}
               </span>
             </div>
 
@@ -837,7 +1004,7 @@ export default function EditorApp(): React.JSX.Element {
 
             <p className="text-center font-mono text-[11px] text-black/55">
               {multiPart
-                ? "All parts stacked as one canvas — annotate across them, export flattens to a single file."
+                ? "Parts previewed stacked — each part is a separate file. Single-file export works only if the stacked total fits browser canvas limits."
                 : "Annotate with shapes, arrows, text, blur, or crop — then Export or Copy."}{" "}
               Shortcuts: V R O A T P H N B D C · Del · Ctrl+Z · click selects, drag moves, empty/right-click clears
             </p>
@@ -852,6 +1019,11 @@ export default function EditorApp(): React.JSX.Element {
           onClose={() => setExportOpen(false)}
           onDownload={() => void doDownload()}
           onDownloadParts={multiPart ? downloadPartsIndividually : undefined}
+          singleBlocked={singleBlocked}
+          onDownloadFullRes={singleBlocked && multiPart ? () => void doDownloadFullRes() : undefined}
+          fullResLabel={stackedSize ? `Download single PNG · full resolution (${stackedSize.w}×${stackedSize.h}px)` : undefined}
+          onDownloadScaled={scaledInfo ? () => void doDownloadScaled() : undefined}
+          scaledLabel={scaledInfo ? `Download single file (${scaledInfo.pct}% · ${scaledInfo.width}×${scaledInfo.height}px)` : undefined}
         />
       </main>
     </div>

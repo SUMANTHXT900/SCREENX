@@ -12,6 +12,7 @@ import { showToast, type ToastOptions } from "./ui/toast.js";
 import { enterSelectionMode, cancelSelectionMode, dismissSelectionMode } from "./selection/selectionManager.js";
 import { getOverlay } from "./selection/selectionOverlay.js";
 import { claimCopySlot, dataUrlToBlob } from "./clipboardWrite.js";
+import { hideStickyBars, restoreStickyBars } from "./dom/stickyHider.js";
 
 /**
  * MUST stay in sync with CONTENT_PROTOCOL_VERSION in src/messaging/events.ts.
@@ -20,7 +21,7 @@ import { claimCopySlot, dataUrlToBlob } from "./clipboardWrite.js";
  * Rollup emit a chunk + `import` statement that throws SyntaxError on load.
  * Guarded by tests/content-bundle.test.ts — do not "clean up".
  */
-const CONTENT_PROTOCOL_VERSION = 5;
+const CONTENT_PROTOCOL_VERSION = 6;
 
 
 // Guard against double injection (for scripting fallback)
@@ -138,6 +139,36 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
           case "SCREENX_RESTORE_CAPTURE": {
             const r = restoreCapture();
             sendResponse(r);
+            break;
+          }
+          case "SCREENX_HIDE_STICKY": {
+            // Multi-strip passes only: hide fixed/sticky bars overlapping the
+            // capture band so no strip re-photographs them (hiding beats
+            // trimming — trimmed rows can never be recovered, hidden bars
+            // simply aren't in any strip). visibility:hidden causes no reflow.
+            // Single-shot captures never send this (must look like the screen).
+            if (!isCapturePrepared()) prepareCapture();
+            try {
+              const { bandLeft, bandRight } = message as { bandLeft?: unknown; bandRight?: unknown };
+              const scroller = getActiveScrollController()?.element ?? null;
+              const count = hideStickyBars(
+                typeof bandLeft === "number" ? bandLeft : undefined,
+                typeof bandRight === "number" ? bandRight : undefined,
+                scroller
+              );
+              sendResponse({ ok: true, hidden: count });
+            } catch (e) {
+              sendResponse({ ok: false, hidden: 0, error: e instanceof Error ? e.message : String(e) });
+            }
+            break;
+          }
+          case "SCREENX_RESTORE_STICKY": {
+            try {
+              const restored = restoreStickyBars();
+              sendResponse({ ok: true, restored });
+            } catch (e) {
+              sendResponse({ ok: false, restored: 0, error: e instanceof Error ? e.message : String(e) });
+            }
             break;
           }
           case "SCREENX_RESET_CAPTURE_STATE": {

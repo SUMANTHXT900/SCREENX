@@ -67,7 +67,7 @@ export interface ProgressPayload {
 // stale content scripts (open tabs keep running pre-update code that even
 // re-injection cannot replace — the double-inject guard skips it), telling
 // the user to reload the tab instead of failing cryptically.
-export const CONTENT_PROTOCOL_VERSION = 5;
+export const CONTENT_PROTOCOL_VERSION = 6;
 
 // ── Message Type Constants ──────────────────────────────────────────
 export const MESSAGE_TYPES = {
@@ -92,6 +92,8 @@ export const MESSAGE_TYPES = {
   DOWNLOAD_BLOB: "SCREENX_DOWNLOAD_BLOB",
   DISMISS_SELECTION: "SCREENX_DISMISS_SELECTION",
   RESET_CAPTURE_STATE: "SCREENX_RESET_CAPTURE_STATE",
+  HIDE_STICKY: "SCREENX_HIDE_STICKY",
+  RESTORE_STICKY: "SCREENX_RESTORE_STICKY",
 } as const;
 
 export type MessageTypeValue = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
@@ -236,6 +238,22 @@ export interface ResetCaptureStateMessage {
   type: "SCREENX_RESET_CAPTURE_STATE";
 }
 
+/**
+ * Hide fixed/sticky bars overlapping the capture band (multi-strip passes).
+ * Best-effort: unknown to stale content scripts — callers must fall back to
+ * occlusion trimming when ok:false.
+ */
+export interface HideStickyMessage {
+  type: "SCREENX_HIDE_STICKY";
+  bandLeft?: number;
+  bandRight?: number;
+}
+
+/** Restore bars hidden by HideStickyMessage. Best-effort, never throws. */
+export interface RestoreStickyMessage {
+  type: "SCREENX_RESTORE_STICKY";
+}
+
 // ── Discriminated Union ─────────────────────────────────────────────
 
 export type ExtensionMessage =
@@ -259,7 +277,9 @@ export type ExtensionMessage =
   | ToastActionMessage
   | DownloadBlobMessage
   | DismissSelectionMessage
-  | ResetCaptureStateMessage;
+  | ResetCaptureStateMessage
+  | HideStickyMessage
+  | RestoreStickyMessage;
 
 export type ExtensionMessageType = ExtensionMessage["type"];
 

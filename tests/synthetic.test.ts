@@ -4,19 +4,21 @@ import { test, expect, describe } from "vitest";
 describe("Planner tests", () => {
   test("Test 1: No occlusions", () => {
     const positions = calculateRangePositions(0, 1000, 800, 2000, 40, 0, 0);
-    expect(positions).toEqual([0, 800]);
+    // The planner keeps a 160px overlap on an 800px viewport so seam alignment
+    // can correct fractional-DPR and layout drift.
+    expect(positions).toEqual([0, 640]);
   });
 
   test("Test 2: Perfect fit at end", () => {
     const positions = calculateRangePositions(100, 2500, 800, 5000, 40, 0, 0);
-    // 100 + 800 = 900, 900 + 800 = 1700. 1700 + 800 = 2500.
-    // 3 viewports: 100->900, 900->1700, 1700->2500
-    expect(positions).toEqual([100, 900, 1700]);
+    // Step = 640px (800px viewport − 160px alignment overlap).
+    expect(positions).toEqual([100, 740, 1380, 2020]);
   });
 
   test("Test 3: Fixed occlusion", () => {
     const positions = calculateRangePositions(100, 2500, 800, 5000, 40, 100, 50);
-    expect(positions).toEqual([0, 650, 1300, 1950]);
+    // 100px top + 50px bottom overlays require a 170px overlap; step=630px.
+    expect(positions).toEqual([0, 630, 1260, 1890]);
   });
 
   test("Test 4: Clamp at maxScrollY", () => {
@@ -89,10 +91,10 @@ describe("Stitcher math tests", () => {
     const maxScrollY = 60000;
     const positions = calculateRangePositions(startY, endY, viewportHeight, maxScrollY, 150, 0, 0);
 
-    // Height is 30,461px with 800px viewport, step 800 → exactly 39 chunks.
-    expect(positions.length).toBe(39);
+    // Height is 30,461px with a 640px aligned step → 48 overlapping chunks.
+    expect(positions.length).toBe(48);
     expect(positions[0]).toBe(startY);
-    expect(positions[positions.length - 1]).toBe(54517);
+    expect(positions[positions.length - 1]).toBe(54197);
     expect(positions[positions.length - 1]! + viewportHeight).toBeGreaterThanOrEqual(endY);
   });
 
@@ -104,8 +106,8 @@ describe("Stitcher math tests", () => {
     const botOcclusion = 40;
     const positions = calculateRangePositions(startY, endY, vpH, 50000, 150, topOcclusion, botOcclusion);
 
-    // 40,000px at step 780 (900-80-40) → exactly 52 chunks.
-    expect(positions.length).toBe(52);
+    // 40,000px with a 720px aligned step (900 − 180 overlap) → 56 chunks.
+    expect(positions.length).toBe(56);
 
     // Verify mathematical continuity
     let coveredDocY = startY;

@@ -2,18 +2,18 @@
  * Workspace grouping — folds auto-split parts (shared groupId) into one
  * card. Pure (no chrome APIs) — tested in tests/grouping.test.ts.
  */
-import type { CaptureRecord } from "@/storage/idb/capturesRepo";
+import type { CaptureMeta, CaptureRecord } from "@/storage/idb/capturesRepo";
 
-export interface Group {
+export interface Group<T extends CaptureRecord | CaptureMeta = CaptureRecord | CaptureMeta> {
   key: string;
   /** Cover record: earliest-created part (same-ms ties break to lowest part). */
-  first: CaptureRecord;
+  first: T;
   count: number;
   ids: string[];
 }
 
-export function toGroups(records: CaptureRecord[]): Group[] {
-  const map = new Map<string, Group>();
+export function toGroups<T extends CaptureRecord | CaptureMeta>(records: T[]): Group<T>[] {
+  const map = new Map<string, Group<T>>();
   for (const r of records) {
     const key = r.groupId ?? r.id;
     const g = map.get(key);

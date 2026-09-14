@@ -65,16 +65,23 @@ export async function scrollToAndSettle(
       c.setScrollTop(clampedY);
       c.setScrollLeft(clampedX);
 
-      // Repaint, then a real settle pause (lazy images, fade-ins), then verify
-      // the container has actually stopped moving before trusting a reading.
+      // Repaint, then a real settle pause (lazy images, fade-ins, webfonts),
+      // then verify the container has stopped moving before trusting a
+      // reading. Attempt 1 waits longer: the first scroll kicks off the most
+      // lazy decoding, and capturing too early shifts every later seam.
       await new Promise<void>((resolve) => {
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
-            setTimeout(resolve, 100 + attempts * 100);
+            setTimeout(resolve, 150 + attempts * 100);
           });
         });
       });
       await waitForStableScroll(c);
+      // Best-effort content quiet: fonts + one layout-height poll. Lazy
+      // images/fonts that resolve BETWEEN the position read and the shot are
+      // the classic "rows moved under us" seam tear. Never blocks longer
+      // than ~600ms and never throws.
+      await waitForQuietContent();
 
       actualX = c.getScrollLeft();
       actualY = c.getScrollTop();
@@ -110,6 +117,41 @@ export async function scrollToAndSettle(
 
   void maxScrollX;
   return { requestedX: x, requestedY: y, actualX, actualY, attempts, settled };
+}
+
+/** Best-effort wait for fonts/layout to stop shifting rows (~600ms max). */
+export function waitForQuietContent(timeoutMs = 600): Promise<void> {
+  const quiet = (async () => {
+    try {
+      // Webfont swap shifts line breaks mid-capture on Substack/Medium-likes.
+      const fonts = (document as unknown as { fonts?: { ready?: Promise<unknown> } }).fonts;
+      if (fonts?.ready) {
+        await Promise.race([
+          fonts.ready,
+          new Promise<void>((r) => setTimeout(r, 350)),
+        ]);
+      }
+    } catch {
+      // ignore
+    }
+    try {
+      // Two height samples 120ms apart: a changing scrollHeight means lazy
+      // content is still reflowing — wait one more beat, then proceed anyway
+      // (the stitcher's gap-heal + aligner absorb the residue).
+      const h1 = document.documentElement?.scrollHeight ?? 0;
+      await new Promise<void>((r) => setTimeout(r, 120));
+      const h2 = document.documentElement?.scrollHeight ?? 0;
+      if (h1 > 0 && h2 !== h1) {
+        await new Promise<void>((r) => setTimeout(r, 120));
+      }
+    } catch {
+      // ignore
+    }
+  })();
+  return Promise.race([
+    quiet,
+    new Promise<void>((r) => setTimeout(r, timeoutMs)),
+  ]);
 }
 
 /** Poll until the container stops moving (≤0.5px between frames, ≤30 frames). */
