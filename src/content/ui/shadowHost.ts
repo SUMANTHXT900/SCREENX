@@ -1,8 +1,25 @@
 let uiRootHost: HTMLDivElement | null = null;
 let uiShadowRoot: ShadowRoot | null = null;
 
+export function isUiRootMounted(): boolean {
+  return !!uiRootHost && uiRootHost.isConnected && !!uiShadowRoot;
+}
+
 export function ensureUiRoot(): ShadowRoot {
-  if (uiShadowRoot) return uiShadowRoot;
+  if (uiShadowRoot && uiRootHost) {
+    if (!uiRootHost.isConnected) {
+      // SX-09: Recover detached host when an SPA route change removes/replaces body children
+      const parent = document.body || document.documentElement;
+      if (parent) {
+        parent.appendChild(uiRootHost);
+      }
+    }
+    if (uiRootHost.isConnected) {
+      return uiShadowRoot;
+    }
+    uiRootHost = null;
+    uiShadowRoot = null;
+  }
 
   uiRootHost = document.createElement("div");
   uiRootHost.id = "__screenx_ui_root";

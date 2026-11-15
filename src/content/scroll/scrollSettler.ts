@@ -77,11 +77,11 @@ export async function scrollToAndSettle(
         });
       });
       await waitForStableScroll(c);
-      // Best-effort content quiet: fonts + one layout-height poll. Lazy
-      // images/fonts that resolve BETWEEN the position read and the shot are
+      // Best-effort content quiet: fonts + active pane layout-height poll (SX-07).
+      // Lazy images/fonts that resolve BETWEEN the position read and the shot are
       // the classic "rows moved under us" seam tear. Never blocks longer
       // than ~600ms and never throws.
-      await waitForQuietContent();
+      await waitForQuietContent(c);
 
       actualX = c.getScrollLeft();
       actualY = c.getScrollTop();
@@ -92,16 +92,24 @@ export async function scrollToAndSettle(
       }
     }
   } finally {
-    // Restore even if getMaxScrollY throws mid-loop — leaving snap "none"
-    // would permanently break the page's scrolling.
-    try {
-      if (el instanceof HTMLElement && el.style) {
-        el.style.scrollSnapType = originalScrollSnap;
-        el.style.overflowAnchor = originalOverflowAnchor;
+    // Only restore if not inside a prepared capture session (SX-10).
+    // In a prepared session, styles are held across the entire multi-shot run
+    // and cleanly restored by restoreCapture() — restoring here would snap
+    // the layout back right before the screenshot exposure!
+    const inPreparedSession =
+      typeof document !== "undefined" &&
+      document.documentElement?.classList?.contains("__screenx_capturing");
+
+    if (!inPreparedSession) {
+      try {
+        if (el instanceof HTMLElement && el.style) {
+          el.style.scrollSnapType = originalScrollSnap;
+          el.style.overflowAnchor = originalOverflowAnchor;
+        }
+        if (docEl && el !== docEl) docEl.style.scrollSnapType = docSnap;
+      } catch {
+        // ignore
       }
-      if (docEl && el !== docEl) docEl.style.scrollSnapType = docSnap;
-    } catch {
-      // ignore
     }
   }
 
@@ -120,7 +128,7 @@ export async function scrollToAndSettle(
 }
 
 /** Best-effort wait for fonts/layout to stop shifting rows (~600ms max). */
-export function waitForQuietContent(timeoutMs = 600): Promise<void> {
+export function waitForQuietContent(controller?: ScrollController | null, timeoutMs = 600): Promise<void> {
   const quiet = (async () => {
     try {
       // Webfont swap shifts line breaks mid-capture on Substack/Medium-likes.
@@ -138,9 +146,21 @@ export function waitForQuietContent(timeoutMs = 600): Promise<void> {
       // Two height samples 120ms apart: a changing scrollHeight means lazy
       // content is still reflowing — wait one more beat, then proceed anyway
       // (the stitcher's gap-heal + aligner absorb the residue).
-      const h1 = document.documentElement?.scrollHeight ?? 0;
+      // SX-07 fix: measure the active scroll controller, not just documentElement!
+      const measureHeight = () => {
+        if (controller) {
+          try {
+            return controller.getScrollHeight();
+          } catch {
+            // fall through
+          }
+        }
+        return document.documentElement?.scrollHeight ?? 0;
+      };
+
+      const h1 = measureHeight();
       await new Promise<void>((r) => setTimeout(r, 120));
-      const h2 = document.documentElement?.scrollHeight ?? 0;
+      const h2 = measureHeight();
       if (h1 > 0 && h2 !== h1) {
         await new Promise<void>((r) => setTimeout(r, 120));
       }
