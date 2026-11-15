@@ -25,6 +25,10 @@ export interface CaptureResult {
   partTotal?: number;
   /** Scrolling stopped advancing mid-capture; the result is a partial run. */
   stoppedEarly?: boolean;
+  /** Coverage verification: true if capture is incomplete / partial (SX-08). */
+  isPartial?: boolean;
+  coveragePercent?: number;
+  coverageStatus?: "complete" | "partial" | "failed";
 }
 
 export type CaptureErrorCode =

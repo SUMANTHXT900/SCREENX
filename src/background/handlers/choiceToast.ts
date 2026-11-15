@@ -14,6 +14,8 @@ export interface ChoiceInput {
   partIndex?: number;
   partTotal?: number;
   stoppedEarly?: boolean;
+  isPartial?: boolean;
+  coveragePercent?: number;
   sourceTabId?: number;
 }
 
@@ -23,9 +25,16 @@ function choiceToast(
   copyNote?: string
 ): { title: string; message: string } {
   const multi = (result.partTotal ?? 0) > 1;
-  const early = result.stoppedEarly === true;
-  const title = early ? "Captured (stopped early)" : multi ? `Captured ${result.partTotal} parts` : "Screenshot captured";
-  const earlyNote = early ? "Scrolling stopped advancing — saved everything up to that point. " : "";
+  const isPartial = result.stoppedEarly === true || result.isPartial === true;
+  const hasPct = typeof result.coveragePercent === "number" && result.coveragePercent < 100;
+  const title = isPartial
+    ? hasPct
+      ? `Captured (partial \u2014 ${result.coveragePercent}% coverage)`
+      : "Captured (stopped early)"
+    : multi
+      ? `Captured ${result.partTotal} parts`
+      : "Screenshot captured";
+  const earlyNote = isPartial ? "Page capture incomplete \u2014 saved available content. " : "";
   // copied=true: the UX contract — image is already on the clipboard.
   // copied=false: say WHY, so the user knows whether to tap Copy (focus miss)
   // or skip straight to Download/Editor (page can't be written to).

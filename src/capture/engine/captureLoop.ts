@@ -109,6 +109,8 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
         /** Scroller viewport offset post-settle (0,0 for window). */
         rectLeft?: number;
         rectTop?: number;
+        rectWidth?: number;
+        rectHeight?: number;
         /** Viewport dims post-settle (mid-run change detection). */
         vw?: number;
         vh?: number;
@@ -163,9 +165,11 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
         );
       }
     }
-    // Scroller viewport offset for this chunk (stitcher frame mapping).
+    // Scroller viewport offset and dims for this chunk (stitcher frame mapping).
     const rectLeft = typeof scrollRes.rectLeft === "number" ? scrollRes.rectLeft : 0;
     const rectTop = typeof scrollRes.rectTop === "number" ? scrollRes.rectTop : 0;
+    const rectWidth = typeof scrollRes.rectWidth === "number" ? scrollRes.rectWidth : undefined;
+    const rectHeight = typeof scrollRes.rectHeight === "number" ? scrollRes.rectHeight : undefined;
     // Snap near-origin readings so a top-anchored chunk hits the stitcher's
     // keep-top path exactly (see snapChunkCoord).
     const recordY = snapChunkCoord(requestedY, actualY);
@@ -231,7 +235,7 @@ export async function executeCaptureLoop(options: CaptureLoopOptions): Promise<C
     );
     perfCapture += performance.now() - tCaptureStart;
 
-    chunks.push({ dataUrl, x: recordX, y: recordY, rx: rectLeft, ry: rectTop });
+    chunks.push({ dataUrl, x: recordX, y: recordY, rx: rectLeft, ry: rectTop, rw: rectWidth, rh: rectHeight });
 
     sendProgress(tabId, {
       mode,

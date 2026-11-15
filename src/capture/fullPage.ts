@@ -65,12 +65,17 @@ export async function captureFullPage(): Promise<CaptureResult> {
 
     const { totalWidth, totalHeight, dpr } = metrics;
     // Bitmap frame is ALWAYS the window viewport (captureVisibleTab photographs
-    // the whole tab): planning steps, occlusion bands, and stitch scale must
-    // use window dims, never the (possibly narrower/shorter) scroll-container
-    // dims — otherwise every strip mis-scales on nested pages. The `??`
-    // fallbacks tolerate stale pre-update content scripts.
+    // the whole tab): stitch scale must use window dims.
     const viewportWidth = metrics.winViewportWidth ?? metrics.viewportWidth;
     const viewportHeight = metrics.winViewportHeight ?? metrics.viewportHeight;
+
+    // SX-02: For scroll position planning, use the pane's visible height
+    // (not the full window height) when capturing a nested scroller.
+    // The pane is the only part that scrolls — the rest is fixed shell.
+    const isNested = metrics.controllerType && metrics.controllerType !== "window";
+    const paneHeight = isNested && metrics.paneHeight && metrics.paneHeight > 0
+      ? metrics.paneHeight
+      : viewportHeight;
 
     if (!Number.isFinite(totalWidth) || !Number.isFinite(totalHeight) || totalWidth <= 0 || totalHeight <= 0) {
       throw new CaptureError("CAPTURE_FAILED", "Page measurement returned invalid dimensions.");
@@ -112,13 +117,15 @@ export async function captureFullPage(): Promise<CaptureResult> {
     // removed via occlusion TRIMS regardless of hiding — the hider only ever
     // takes unmeasurable widgets now, so trims must stand. Single-shot
     // captures skip hiding so the shot looks exactly like the screen.
-    if (totalHeight > viewportHeight) {
+    if (totalHeight > paneHeight) {
       const hide = await hideStickyBarsForCapture(tab.id);
       stickyHidden = hide.active;
     }
 
-    // Calculate positions using shared planner (allowing up to 300 viewports with adaptive stepping)
-    const positions = planFullPagePositions(totalHeight, viewportHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
+    // Calculate positions using pane height for coverage planning (SX-02).
+    // For nested scrollers, each scroll step covers paneHeight of content;
+    // for window scrollers, paneHeight === viewportHeight.
+    const positions = planFullPagePositions(totalHeight, paneHeight, metrics.maxScrollY, 300, occludedTopHeight, occludedBottomHeight);
 
     if (positions.length === 0) {
       throw new CaptureError("CAPTURE_FAILED", "No scroll positions calculated.");
@@ -198,6 +205,10 @@ export async function captureFullPage(): Promise<CaptureResult> {
           dpr: dpr || 1,
           occludedTopHeight,
           occludedBottomHeight,
+          paneTop: metrics.paneTop,
+          paneLeft: metrics.paneLeft,
+          paneWidth: metrics.paneWidth,
+          paneHeight,
         });
       } else {
         sendProgress(tab.id, {
@@ -215,6 +226,10 @@ export async function captureFullPage(): Promise<CaptureResult> {
           dpr: dpr || 1,
           occludedTopHeight,
           occludedBottomHeight,
+          paneTop: metrics.paneTop,
+          paneLeft: metrics.paneLeft,
+          paneWidth: metrics.paneWidth,
+          paneHeight,
         }).stitch();
       }
       parts.push({
@@ -228,11 +243,15 @@ export async function captureFullPage(): Promise<CaptureResult> {
         sourceTitle: tab.title,
         width: stitched.width,
         height: stitched.height,
+        coveragePercent: stitched.coverage?.coveragePercent,
+        coverageStatus: stitched.coverage?.status,
         ...(groupId ? { groupId, partIndex: seg.index, partTotal: seg.total } : {}),
       });
     }
     const first = parts[0]!;
-    first.stoppedEarly = loopResult.stoppedEarly || undefined;
+    const hasPartialCoverage = parts.some((p) => p.coverageStatus === "partial" || p.coverageStatus === "failed");
+    first.stoppedEarly = loopResult.stoppedEarly || hasPartialCoverage || undefined;
+    first.isPartial = loopResult.stoppedEarly || hasPartialCoverage || undefined;
 
     sendProgress(tab.id, {
       mode: "full-page",
