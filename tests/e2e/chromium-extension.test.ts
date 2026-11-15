@@ -167,8 +167,16 @@ test.describe("Chromium Extension E2E Suite", () => {
   });
 
   test.afterAll(async () => {
-    try { await context.close(); } catch {}
-    try { server.close(); } catch {}
+    try {
+      await context.close();
+    } catch {
+      // ignore
+    }
+    try {
+      server.close();
+    } catch {
+      // ignore
+    }
   });
 
   test("1. Simple window scroll: Extension service worker loaded and active", async () => {
@@ -176,9 +184,14 @@ test.describe("Chromium Extension E2E Suite", () => {
     await page.waitForTimeout(500);
 
     // Verify extension background service worker is loaded and active
-    let [background] = context.serviceWorkers();
+    const workers = context.serviceWorkers();
+    let background = workers[0];
     if (!background) {
-      background = await context.waitForEvent("serviceworker", { timeout: 3000 }).catch(() => null as any);
+      try {
+        background = await context.waitForEvent("serviceworker", { timeout: 3000 });
+      } catch {
+        // service worker may already be active
+      }
     }
 
     expect(page.url()).toContain("/simple-window");

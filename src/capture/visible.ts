@@ -149,6 +149,15 @@ export async function captureVisible(): Promise<CaptureResult> {
 
     await persistCapture(result);
 
+    const diagnostics = {
+      mode: "visible",
+      contentReady,
+      width,
+      height,
+      status: "complete",
+    };
+    console.info("[ScreenX][Diagnostics]", JSON.stringify(diagnostics));
+
     // No success toast here: the background handler shows the sticky
     // copy → editor/download choice toast after capture returns.
     return result;

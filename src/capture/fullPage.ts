@@ -280,6 +280,28 @@ export async function captureFullPage(): Promise<CaptureResult> {
       throw e;
     }
 
+    const diagnostics = {
+      mode: "full-page",
+      controller: metrics.controllerType ?? "window",
+      pane: {
+        left: metrics.paneLeft,
+        top: metrics.paneTop,
+        width: metrics.paneWidth,
+        height: paneHeight,
+      },
+      frame: {
+        winWidth: metrics.winViewportWidth,
+        winHeight: viewportHeight,
+        totalHeight,
+      },
+      scrollPositionsCount: positions.length,
+      chunksCaptured: loopResult.chunks.length,
+      coveragePercent: first.coveragePercent,
+      coverageStatus: first.coverageStatus ?? (first.isPartial ? "partial" : "complete"),
+      stoppedEarly: first.stoppedEarly,
+      partsCount: parts.length,
+    };
+    console.info("[ScreenX][Diagnostics]", JSON.stringify(diagnostics));
 
     // No success toast here: the background handler shows the sticky
     // copy → editor/download choice toast after capture returns (it knows

@@ -166,12 +166,41 @@ export async function countCaptures(): Promise<number> {
 export type CaptureMeta = Omit<CaptureRecord, "blob">;
 
 export async function listCaptureMeta(limit = 200): Promise<CaptureMeta[]> {
-  const records = await listCaptures(limit);
-  return records.map((r) => {
-    const { blob: _drop, ...meta } = r;
-    void _drop;
-    return meta;
-  });
+  let db: IDBDatabase | null = null;
+  try {
+    db = await openDB();
+    const records = await new Promise<CaptureMeta[]>((resolve, reject) => {
+      const tx = db!.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const index = store.index("createdAt");
+      const results: CaptureMeta[] = [];
+      const req = index.openCursor(null, "prev");
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor && results.length < limit) {
+          const val = cursor.value as CaptureRecord;
+          const { blob: _drop, ...meta } = val;
+          void _drop;
+          results.push(meta);
+          cursor.continue();
+        } else {
+          resolve(results);
+        }
+      };
+      req.onerror = () => reject(req.error ?? new Error("listCaptureMeta failed"));
+    });
+    return records;
+  } catch (e) {
+    if (e instanceof CaptureError) throw e;
+    const msg = e instanceof Error ? e.message : String(e);
+    throw new CaptureError("STORAGE_FAILED", `IndexedDB listCaptureMeta failed: ${msg}`, { cause: e as Error });
+  } finally {
+    try {
+      db?.close();
+    } catch {
+      // ignore
+    }
+  }
 }
 
 export async function listCaptures(limit = 100): Promise<CaptureRecord[]> {  let db: IDBDatabase | null = null;
