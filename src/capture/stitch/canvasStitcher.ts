@@ -25,6 +25,19 @@ export interface StitchChunk {
    */
   rx?: number;
   ry?: number;
+  /** SX-02: scroller viewport width & height (clientWidth / clientHeight). */
+  rw?: number;
+  rh?: number;
+}
+
+export interface StitchCoverage {
+  status: "complete" | "partial" | "failed";
+  coveragePercent: number;
+  coveredDocY: number;
+  targetEndY: number;
+  gapDocPx: number;
+  healedDocPx: number;
+  clippedPx: number;
 }
 
 export interface StitchOutput {
@@ -32,6 +45,7 @@ export interface StitchOutput {
   width: number;
   height: number;
   dataUrl: string;
+  coverage?: StitchCoverage;
 }
 
 export interface CanvasStitcherOptions {
@@ -46,6 +60,16 @@ export interface CanvasStitcherOptions {
   totalHeight?: number;
   // If undefined, implies full page capture
   selection?: RangeSelection;
+  /**
+   * SX-02: scroll pane geometry within the window viewport.
+   * For window scrollers, pane covers the full viewport (0, 0, vpW, vpH).
+   * For nested scrollers, pane is the scroller's client rect.
+   * Used to plan per-strip content coverage (paneHeight, not viewportHeight).
+   */
+  paneTop?: number;
+  paneLeft?: number;
+  paneWidth?: number;
+  paneHeight?: number;
 }
 
 /**
@@ -171,6 +195,10 @@ export class CanvasStitcher implements Stitcher {
   private dpr: number;
   private occludedTopHeight: number;
   private occludedBottomHeight: number;
+  /** SX-02: visible height of the scroll pane (== viewportHeight for window). */
+  private paneHeight: number;
+  /** SX-02: visible width of the scroll pane (== viewportWidth for window). */
+  private paneWidth: number;
 
   private targetX: number;
   private targetY: number;
@@ -185,6 +213,13 @@ export class CanvasStitcher implements Stitcher {
     this.dpr = options.dpr || 1;
     this.occludedTopHeight = options.occludedTopHeight || 0;
     this.occludedBottomHeight = options.occludedBottomHeight || 0;
+    // SX-02: pane dimensions for coverage calculation; default to viewport dimensions
+    this.paneHeight = options.paneHeight && options.paneHeight > 0
+      ? options.paneHeight
+      : options.viewportHeight;
+    this.paneWidth = options.paneWidth && options.paneWidth > 0
+      ? options.paneWidth
+      : options.viewportWidth;
 
     if (options.selection) {
       this.isFullPage = false;
@@ -195,7 +230,7 @@ export class CanvasStitcher implements Stitcher {
     } else if (options.totalWidth !== undefined && options.totalHeight !== undefined) {
       this.isFullPage = true;
       this.targetX = 0;
-      this.targetWidth = Math.min(options.totalWidth, options.viewportWidth);
+      this.targetWidth = Math.min(options.totalWidth, this.paneWidth);
       this.targetY = 0;
       this.targetHeight = options.totalHeight;
     } else {
@@ -274,10 +309,17 @@ export class CanvasStitcher implements Stitcher {
     const finalWidth = Math.round(this.targetWidth * dpr);
     const finalHeight = Math.round(this.targetHeight * dpr);
 
-    if (this.isFullPage && this.chunks.length === 1 && this.targetX === 0 && this.targetY === 0) {
+    if (
+      this.isFullPage &&
+      this.chunks.length === 1 &&
+      this.targetX === 0 &&
+      this.targetY === 0 &&
+      this.targetHeight <= this.paneHeight &&
+      this.targetWidth <= this.paneWidth
+    ) {
       const c = this.chunks[0]!;
-      const visibleHeight = Math.min(this.viewportHeight, this.targetHeight - c.y);
-      const visibleWidth = Math.min(this.viewportWidth, this.targetWidth - c.x);
+      const visibleHeight = Math.min(this.paneHeight, this.targetHeight - c.y);
+      const visibleWidth = Math.min(this.paneWidth, this.targetWidth - c.x);
 
       if (visibleHeight === this.viewportHeight && visibleWidth === this.viewportWidth) {
         const res = await fetch(c.dataUrl);
@@ -291,6 +333,15 @@ export class CanvasStitcher implements Stitcher {
           width: w,
           height: h,
           dataUrl: c.dataUrl,
+          coverage: {
+            status: "complete",
+            coveragePercent: 100,
+            coveredDocY: this.targetHeight,
+            targetEndY: this.targetHeight,
+            gapDocPx: 0,
+            healedDocPx: 0,
+            clippedPx: 0,
+          },
         };
       }
       
@@ -324,14 +375,24 @@ export class CanvasStitcher implements Stitcher {
         );
         bmp.close();
         
+        const singleCoverage: StitchCoverage = {
+          status: "complete",
+          coveragePercent: 100,
+          coveredDocY: this.targetHeight,
+          targetEndY: this.targetHeight,
+          gapDocPx: 0,
+          healedDocPx: 0,
+          clippedPx: 0,
+        };
+
         if ("convertToBlob" in canvas) {
           const blob = await (canvas as OffscreenCanvas).convertToBlob({ type: "image/png" });
-          return { blob, width: fw, height: fh, dataUrl: "" };
+          return { blob, width: fw, height: fh, dataUrl: "", coverage: singleCoverage };
         }
         const dataUrl = (canvas as unknown as HTMLCanvasElement).toDataURL("image/png");
         const res = await fetch(dataUrl);
         const blob = await res.blob();
-        return { blob, width: fw, height: fh, dataUrl };
+        return { blob, width: fw, height: fh, dataUrl, coverage: singleCoverage };
       } catch (e) {
         try { bmp.close(); } catch { /* ignore */ }
         const msg = e instanceof Error ? e.message : String(e);
@@ -387,6 +448,11 @@ export class CanvasStitcher implements Stitcher {
       const vpY = chunk.y;
       const vpW = this.viewportWidth;
       const vpH = this.viewportHeight;
+      // SX-02: for safe-band calculation, use pane height (the visible scroll
+      // content extent per strip), not the full window height. For window
+      // scrollers, paneH === vpH.
+      const paneH = chunk.rh ?? this.paneHeight;
+      const paneW = chunk.rw ?? this.paneWidth;
       // Scroller viewport offset for THIS chunk (0,0 for window). Rects move
       // as the page scrolls, so a cached/global rect would mis-sample strips.
       const rectLeft = chunk.rx ?? 0;
@@ -398,9 +464,10 @@ export class CanvasStitcher implements Stitcher {
       // occlusion. Those rows are photographed in no other chunk — trimming
       // them leaves a permanent white tail exactly occludedBottomHeight tall.
       // (A fixed bottom bar may show at the very end; a gap is worse.)
+      // SX-02: use paneH for content coverage, not vpH (window height).
       const safeBottom = isLastChunk
-        ? Math.min(vpY + vpH, targetEndY)
-        : vpY + vpH - effOccBottom;
+        ? Math.min(vpY + paneH, targetEndY)
+        : vpY + paneH - effOccBottom;
 
       // Retain the deliberate viewport overlap for pixel alignment, then heal
       // doc-space gaps BEFORE sampling: if the scroll jumped further than the
@@ -415,7 +482,7 @@ export class CanvasStitcher implements Stitcher {
       if (sliceDocTop > coveredDocY && coveredDocY > this.targetY) {
         const gap = sliceDocTop - coveredDocY;
         // Only heal plausible seam gaps (not a genuinely missing viewport).
-        if (gap > 0 && gap <= vpH) {
+        if (gap > 0 && gap <= paneH) {
           const availableAbove = sliceDocTop - vpY;
           const heal = Math.min(gap, Math.max(0, availableAbove));
           if (heal > 0) {
@@ -445,24 +512,30 @@ export class CanvasStitcher implements Stitcher {
         const scaleYForTrim = scaleY > 0 ? scaleY : canvasScaleY;
 
         const sliceDocLeft = Math.max(vpX, this.targetX);
-        const sliceDocRight = Math.min(vpX + vpW, this.targetX + this.targetWidth);
+        const sliceDocRight = Math.min(vpX + paneW, this.targetX + this.targetWidth);
         if (sliceDocRight <= sliceDocLeft) {
           bmp.close();
           continue;
         }
 
-        const globalLeft = Math.round((rectLeft + sliceDocLeft) * scaleX);
-        const globalRight = Math.round((rectLeft + sliceDocRight) * scaleX);
-        const globalTop = Math.round((rectTop + sliceDocTop) * scaleY);
-        const globalBottom = Math.round((rectTop + sliceDocBottom) * scaleY);
+        // Source pixel mapping: content at document coordinate D is at
+        // viewport position rectOffset + (D − scrollOffset). The bitmap
+        // pixel = round(viewportPos * bitmapScale). Previous code added
+        // rectLeft/rectTop to BOTH content and scroll coords, so they
+        // cancelled — losing the pane offset entirely (SX-01 fix).
+        // Clip source extraction to the pane client bounds so application
+        // shell (composer, sidebar, headers) is never sampled as content (SX-02).
+        const screenLeft = Math.max(rectLeft, rectLeft + (sliceDocLeft - vpX));
+        const screenRight = Math.min(rectLeft + paneW, rectLeft + (sliceDocRight - vpX));
+        const screenTop = Math.max(rectTop, rectTop + (sliceDocTop - vpY));
+        const screenBottom = Math.min(rectTop + paneH, rectTop + (sliceDocBottom - vpY));
 
-        const globalVpX = Math.round((rectLeft + vpX) * scaleX);
-        const globalVpY = Math.round((rectTop + vpY) * scaleY);
-
-        const srcX = Math.max(0, globalLeft - globalVpX);
-        let srcY = Math.max(0, globalTop - globalVpY);
-        const srcW = Math.min(bmp.width - srcX, globalRight - globalLeft);
-        let srcH = Math.min(bmp.height - srcY, globalBottom - globalTop);
+        const srcX = Math.max(0, Math.round(screenLeft * scaleX));
+        let srcY = Math.max(0, Math.round(screenTop * scaleY));
+        const srcRight = Math.min(bmp.width, Math.round(screenRight * scaleX));
+        const srcBottom = Math.min(bmp.height, Math.round(screenBottom * scaleY));
+        const srcW = Math.max(0, Math.min(bmp.width - srcX, srcRight - srcX));
+        let srcH = Math.max(0, Math.min(bmp.height - srcY, srcBottom - srcY));
 
         // Destinations use the CANVAS scale (target-relative, not differenced
         // rounded absolutes) so spans match the canvas at fractional DPR even
@@ -609,14 +682,36 @@ export class CanvasStitcher implements Stitcher {
       await new Promise<void>((r) => setTimeout(r, 0));
     }
 
-    if (coveredDocY < targetEndY - 2) {
-      const gap = targetEndY - coveredDocY;
+    const uncoveredGap = Math.max(0, targetEndY - coveredDocY);
+    const totalMissingDocPx = gapDocPx + (uncoveredGap > 2 ? uncoveredGap : 0);
+    const coveragePercent = this.targetHeight > 0
+      ? Math.max(0, Math.min(100, Math.round(((this.targetHeight - totalMissingDocPx) / this.targetHeight) * 100)))
+      : 100;
+
+    let coverageStatus: "complete" | "partial" | "failed" = "complete";
+    if (coveragePercent < 20 && this.chunks.length > 0) {
+      coverageStatus = "failed";
+    } else if (uncoveredGap > 2 || gapDocPx > 0) {
+      coverageStatus = "partial";
+    }
+
+    const coverage: StitchCoverage = {
+      status: coverageStatus,
+      coveragePercent,
+      coveredDocY,
+      targetEndY,
+      gapDocPx,
+      healedDocPx,
+      clippedPx,
+    };
+
+    if (uncoveredGap > 2) {
       const label = this.isFullPage ? "[ScreenX] Stitch warning: coveredDocY did not reach page end" : "[ScreenX][SelectedArea] Stitch warning: coveredDocY did not fully reach selEndY";
       console.warn(label, JSON.stringify(this.isFullPage
-        ? { coveredDocY, pageEndY: targetEndY, gap, healedDocPx, clippedPx, gapDocPx }
-        : { coveredDocY, selEndY: targetEndY, gap, healedDocPx, clippedPx, gapDocPx }));
+        ? { coveredDocY, pageEndY: targetEndY, gap: uncoveredGap, healedDocPx, clippedPx, gapDocPx, coveragePercent }
+        : { coveredDocY, selEndY: targetEndY, gap: uncoveredGap, healedDocPx, clippedPx, gapDocPx, coveragePercent }));
     } else if (healedDocPx > 0 || gapDocPx > 0) {
-      console.debug("[ScreenX] stitch seam stats", JSON.stringify({ healedDocPx, clippedPx, gapDocPx, chunks: this.chunks.length }));
+      console.debug("[ScreenX] stitch seam stats", JSON.stringify({ healedDocPx, clippedPx, gapDocPx, chunks: this.chunks.length, coveragePercent }));
     }
 
     try {
@@ -634,6 +729,7 @@ export class CanvasStitcher implements Stitcher {
         width: finalWidth,
         height: finalHeight,
         dataUrl,
+        coverage,
       };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

@@ -65,21 +65,24 @@ export function projectSlice(options: {
   const scaleX = bmpWidth / viewportWidth;
   const scaleY = bmpHeight / viewportHeight;
 
-  // Viewport-space mapping: content column L sits at viewport x = rectLeft +
-  // (L − scrollLeft). Omitting rectLeft samples every strip too far left on
-  // nested scrollers (left edge sliced off) — the offset is NOT optional.
-  const globalLeft = Math.round((rectLeft + sliceDocLeft) * scaleX);
-  const globalRight = Math.round((rectLeft + sliceDocRight) * scaleX);
-  const globalTop = Math.round((rectTop + sliceDocTop) * scaleY);
-  const globalBottom = Math.round((rectTop + sliceDocBottom) * scaleY);
+  // Viewport-space mapping: content row/col C at scroll offset S sits at
+  // viewport position rectOffset + (C − S). The bitmap pixel for that
+  // viewport position is round(viewportPos * scale).
+  //
+  // Previous code added rectLeft/rectTop to BOTH the content coord and the
+  // scroll coord, so they cancelled out — losing the pane offset entirely.
+  // Fix: compute screen position directly as rectOffset + (doc − scroll).
+  const screenLeft = rectLeft + (sliceDocLeft - vpX);
+  const screenRight = rectLeft + (sliceDocRight - vpX);
+  const screenTop = rectTop + (sliceDocTop - vpY);
+  const screenBottom = rectTop + (sliceDocBottom - vpY);
 
-  const globalVpX = Math.round((rectLeft + vpX) * scaleX);
-  const globalVpY = Math.round((rectTop + vpY) * scaleY);
-
-  const srcX = Math.max(0, globalLeft - globalVpX);
-  const srcY = Math.max(0, globalTop - globalVpY);
-  const srcW = Math.min(bmpWidth - srcX, globalRight - globalLeft);
-  const srcH = Math.min(bmpHeight - srcY, globalBottom - globalTop);
+  const srcX = Math.max(0, Math.round(screenLeft * scaleX));
+  const srcY = Math.max(0, Math.round(screenTop * scaleY));
+  const srcRight = Math.min(bmpWidth, Math.round(screenRight * scaleX));
+  const srcBottom = Math.min(bmpHeight, Math.round(screenBottom * scaleY));
+  const srcW = srcRight - srcX;
+  const srcH = srcBottom - srcY;
 
   if (srcW <= 0 || srcH <= 0) return null;
 

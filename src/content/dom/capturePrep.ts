@@ -9,6 +9,8 @@ import { restoreStickyBars } from "./stickyHider";
 
 let originalX = 0;
 let originalY = 0;
+let originalScrollSnap = "";
+let originalOverflowAnchor = "";
 let prepared = false;
 let styleEl: HTMLStyleElement | null = null;
 let scrollController: ScrollController | null = null;
@@ -21,15 +23,26 @@ export function prepareCapture(): { ok: true } {
   originalX = scrollController.getScrollLeft();
   originalY = scrollController.getScrollTop();
 
+  const el = scrollController.element;
+  if (el instanceof HTMLElement && el.style) {
+    originalScrollSnap = el.style.scrollSnapType;
+    originalOverflowAnchor = el.style.overflowAnchor;
+    el.style.scrollSnapType = "none";
+    el.style.overflowAnchor = "none";
+  }
+
   styleEl = document.createElement("style");
   styleEl.id = "__screenx_capture_style";
   styleEl.textContent = `
     html, body {
       scroll-behavior: auto !important;
       scroll-padding: 0 !important;
+      scroll-snap-type: none !important;
     }
     * {
       scroll-behavior: auto !important;
+      scroll-snap-type: none !important;
+      overflow-anchor: none !important;
     }
     html.__screenx_capturing * {
       animation-duration: 0.01ms !important;
@@ -56,6 +69,15 @@ export function restoreCapture(): { ok: true } {
   styleEl = null;
 
   if (prepared && scrollController) {
+    const el = scrollController.element;
+    if (el instanceof HTMLElement && el.style) {
+      try {
+        el.style.scrollSnapType = originalScrollSnap;
+        el.style.overflowAnchor = originalOverflowAnchor;
+      } catch {
+        // ignore
+      }
+    }
     try {
       scrollController.setScrollTop(originalY);
       scrollController.setScrollLeft(originalX);
@@ -67,6 +89,8 @@ export function restoreCapture(): { ok: true } {
       }
     }
   }
+  originalScrollSnap = "";
+  originalOverflowAnchor = "";
   prepared = false;
   scrollController = null;
   return { ok: true as const };

@@ -33,29 +33,39 @@ export async function captureVisible(): Promise<CaptureResult> {
 
     lockToken = await acquireGlobalLock("visible", tab.id);
 
-    // Visible needs no scrolling, but the post-capture UX (clipboard copy,
-    // choice toast, progress HUD) all talk to the content script — ensure a
-    // listener exists or they fail silently with "receiving end does not exist".
-    await ensureContentScript(tab);
+    // SX-06: Native-first visible capture.
+    // The pixel capture primitive (captureVisibleTab) does NOT require page DOM
+    // injection. Attempt content script connection opportunistically for progress
+    // HUD, toast and clipboard, but do not fail visible capture if injection fails.
+    let contentReady = false;
+    try {
+      await ensureContentScript(tab);
+      contentReady = true;
+    } catch {
+      // Degrade gracefully — native capture can still succeed
+      contentReady = false;
+    }
 
     const totalChunks = 1;
     const completedChunks = 0;
 
-    sendProgress(tab.id, {
-      mode: "visible",
-      stage: "Preparing...",
-      percent: Math.round((completedChunks / totalChunks) * 100),
-      currentChunk: 0,
-      totalChunks,
-    });
+    if (contentReady) {
+      sendProgress(tab.id, {
+        mode: "visible",
+        stage: "Preparing...",
+        percent: Math.round((completedChunks / totalChunks) * 100),
+        currentChunk: 0,
+        totalChunks,
+      });
 
-    sendProgress(tab.id, {
-      mode: "visible",
-      stage: "Capturing...",
-      percent: Math.round((completedChunks / totalChunks) * 100),
-      currentChunk: 1,
-      totalChunks,
-    });
+      sendProgress(tab.id, {
+        mode: "visible",
+        stage: "Capturing...",
+        percent: Math.round((completedChunks / totalChunks) * 100),
+        currentChunk: 1,
+        totalChunks,
+      });
+    }
 
     let dataUrl: string;
     try {
@@ -63,10 +73,10 @@ export async function captureVisible(): Promise<CaptureResult> {
         tab.windowId,
         2,
         async () => {
-          if (tab?.id !== undefined) await hideProgressHud(tab.id);
+          if (contentReady && tab?.id !== undefined) await hideProgressHud(tab.id);
         },
         async () => {
-          if (tab?.id !== undefined) await showProgressHud(tab.id);
+          if (contentReady && tab?.id !== undefined) await showProgressHud(tab.id);
         }
       );
     } catch (e) {
@@ -76,13 +86,15 @@ export async function captureVisible(): Promise<CaptureResult> {
     }
 
     const doneChunks = 1;
-    sendProgress(tab.id, {
-      mode: "visible",
-      stage: "Processing...",
-      percent: Math.round((doneChunks / totalChunks) * 100),
-      currentChunk: 1,
-      totalChunks,
-    });
+    if (contentReady) {
+      sendProgress(tab.id, {
+        mode: "visible",
+        stage: "Processing...",
+        percent: Math.round((doneChunks / totalChunks) * 100),
+        currentChunk: 1,
+        totalChunks,
+      });
+    }
 
 
     let width: number | undefined;
@@ -125,15 +137,26 @@ export async function captureVisible(): Promise<CaptureResult> {
       height,
     };
 
-    sendProgress(tab.id, {
-      mode: "visible",
-      stage: "Finalizing...",
-      percent: Math.round((doneChunks / totalChunks) * 100),
-      currentChunk: 1,
-      totalChunks,
-    });
+    if (contentReady) {
+      sendProgress(tab.id, {
+        mode: "visible",
+        stage: "Finalizing...",
+        percent: Math.round((doneChunks / totalChunks) * 100),
+        currentChunk: 1,
+        totalChunks,
+      });
+    }
 
     await persistCapture(result);
+
+    const diagnostics = {
+      mode: "visible",
+      contentReady,
+      width,
+      height,
+      status: "complete",
+    };
+    console.info("[ScreenX][Diagnostics]", JSON.stringify(diagnostics));
 
     // No success toast here: the background handler shows the sticky
     // copy → editor/download choice toast after capture returns.
@@ -153,8 +176,12 @@ export async function captureVisible(): Promise<CaptureResult> {
       // toolbar never sticks at 100% (progress sets it, nothing else clears it).
       clearCaptureBadge();
       if (tab?.id !== undefined) {
-        await hideProgressHud(tab.id);
-        await restoreCapture(tab.id);
+        try {
+          await hideProgressHud(tab.id);
+          await restoreCapture(tab.id);
+        } catch {
+          // ignore — content script may not be present in native-first mode
+        }
       }
     } finally {
       try {

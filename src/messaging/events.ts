@@ -68,6 +68,7 @@ export interface ProgressPayload {
 // re-injection cannot replace — the double-inject guard skips it), telling
 // the user to reload the tab instead of failing cryptically.
 export const CONTENT_PROTOCOL_VERSION = 6;
+export const CONTENT_BUILD_ID = "0.1.25-asis";
 
 // ── Message Type Constants ──────────────────────────────────────────
 export const MESSAGE_TYPES = {
@@ -316,6 +317,11 @@ export interface MeasureResponse {
   maxScrollX: number;
   controllerType?: string;
   fixedElements?: FixedElementBox[];
+  /** SX-02: pane geometry — where the scroll pane sits in the window. */
+  paneLeft?: number;
+  paneTop?: number;
+  paneWidth?: number;
+  paneHeight?: number;
 }
 
 export interface ScrollToResponse {
@@ -323,6 +329,12 @@ export interface ScrollToResponse {
   actualX?: number;
   actualY?: number;
   error?: string;
+  rectLeft?: number;
+  rectTop?: number;
+  rectWidth?: number;
+  rectHeight?: number;
+  vw?: number;
+  vh?: number;
 }
 
 export interface PingResponse {
@@ -330,6 +342,10 @@ export interface PingResponse {
   url?: string;
   /** Content protocol version — see CONTENT_PROTOCOL_VERSION. */
   proto?: number;
+  /** Content build ID — matches CONTENT_BUILD_ID. */
+  buildId?: string;
+  capabilities?: string[];
+  instanceId?: string;
 }
 
 export interface GenericSuccessResponse {

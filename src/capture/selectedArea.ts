@@ -558,6 +558,22 @@ export async function captureSelectedArea(): Promise<CaptureResult> {
       throw e;
     }
 
+    const diagnostics = {
+      mode: "selected-area",
+      controller: metrics?.controllerType ?? "window",
+      selection: {
+        x: normalizedSelection.x,
+        startY: normalizedSelection.startY,
+        width: normalizedSelection.width,
+        endY: normalizedSelection.endY,
+      },
+      chunksCaptured: chunks.length,
+      partsCount: parts.length,
+      stoppedEarly: first.stoppedEarly,
+      status: first.stoppedEarly ? "partial" : "complete",
+    };
+    console.info("[ScreenX][Diagnostics]", JSON.stringify(diagnostics));
+
     // No success toast here: the background handler shows the sticky
     // copy → editor/download choice toast after capture returns.
 

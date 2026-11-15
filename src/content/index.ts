@@ -9,6 +9,7 @@ import { scrollToAndSettle } from "./scroll/scrollSettler.js";
 import { measurePage } from "./dom/metrics.js";
 import { updateProgressHud, hideProgressHud, showProgressHud, type ProgressPayload } from "./ui/progressHud.js";
 import { showToast, type ToastOptions } from "./ui/toast.js";
+import { ensureUiRoot } from "./ui/shadowHost.js";
 import { enterSelectionMode, cancelSelectionMode, dismissSelectionMode } from "./selection/selectionManager.js";
 import { getOverlay } from "./selection/selectionOverlay.js";
 import { claimCopySlot, dataUrlToBlob } from "./clipboardWrite.js";
@@ -22,6 +23,8 @@ import { hideStickyBars, restoreStickyBars } from "./dom/stickyHider.js";
  * Guarded by tests/content-bundle.test.ts — do not "clean up".
  */
 const CONTENT_PROTOCOL_VERSION = 6;
+const CONTENT_BUILD_ID = "0.1.25-asis";
+const CONTENT_INSTANCE_ID = Math.random().toString(36).slice(2, 10);
 
 
 // Guard against double injection (for scripting fallback)
@@ -35,7 +38,14 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
     const type = (message as { type?: string })?.type;
 
     if (type === "PING_CONTENT" || type === "PING") {
-      sendResponse({ ok: true, url: location.href, proto: CONTENT_PROTOCOL_VERSION });
+      sendResponse({
+        ok: true,
+        url: location.href,
+        proto: CONTENT_PROTOCOL_VERSION,
+        buildId: CONTENT_BUILD_ID,
+        capabilities: ["measure", "scroll", "selection", "toast", "hud", "sticky"],
+        instanceId: CONTENT_INSTANCE_ID,
+      });
       return true;
     }
 
@@ -120,20 +130,25 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
             // needs this chunk's rect, never a cached one). Window → 0,0.
             let rectLeft = 0;
             let rectTop = 0;
+            let rectWidth = window.innerWidth;
+            let rectHeight = window.innerHeight;
             try {
               const active = getActiveScrollController();
               const el = active?.element;
               if (el && el !== window && el instanceof HTMLElement) {
                 const rect = el.getBoundingClientRect();
                 if (Number.isFinite(rect.left) && Number.isFinite(rect.top)) {
-                  rectLeft = rect.left;
-                  rectTop = rect.top;
+                  // Inset borders: scroll content begins at rect + clientOffset
+                  rectLeft = rect.left + el.clientLeft;
+                  rectTop = rect.top + el.clientTop;
+                  rectWidth = el.clientWidth;
+                  rectHeight = el.clientHeight;
                 }
               }
             } catch {
               // ignore — rect defaults (window frame) apply
             }
-            sendResponse({ ok: true, ...r, rectLeft, rectTop, vw: window.innerWidth, vh: window.innerHeight });
+            sendResponse({ ok: true, ...r, rectLeft, rectTop, rectWidth, rectHeight, vw: window.innerWidth, vh: window.innerHeight });
             break;
           }
           case "SCREENX_RESTORE_CAPTURE": {
@@ -250,9 +265,11 @@ if ((window as unknown as { __screenXContentScriptLoaded?: boolean }).__screenXC
             }
             try {
               showToast(t);
+              const root = ensureUiRoot();
+              const mounted = !!root.host && root.host.isConnected;
               // Report the honest render result: delivery must mean painted,
               // and focus tells the worker whether the user can even see it.
-              sendResponse({ ok: true, rendered: true, focused: document.hasFocus() });
+              sendResponse({ ok: mounted, rendered: mounted, focused: document.hasFocus() });
             } catch (e) {
               const msg = e instanceof Error ? e.message : String(e);
               console.error("[ScreenX] TOAST render failed:", msg);

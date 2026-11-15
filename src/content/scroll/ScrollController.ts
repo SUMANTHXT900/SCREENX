@@ -62,23 +62,65 @@ export function findElementScrollController(): ScrollController | null {
   const candidates = collectElementsDeep(document);
   let best: HTMLElement | null = null;
   let bestScore = 0;
+  const scoredCandidates: Array<{ el: HTMLElement; score: number; scrollRange: number }> = [];
+
+  const winW = window.innerWidth;
+  const winH = window.innerHeight;
+  const winArea = winW * winH;
+
   for (const el of candidates) {
-    // A 4px threshold admits short real panes while filtering subpixel/layout
-    // noise. The point-based selector uses the same contract below.
-    if (el.scrollHeight - el.clientHeight <= 4) continue;
-    if (el.clientHeight <= window.innerHeight * 0.4) continue;
+    if (!el.isConnected) continue;
+    // 4px threshold admits real panes while filtering subpixel/layout noise
+    const scrollableHeight = el.scrollHeight - el.clientHeight;
+    if (scrollableHeight <= 4) continue;
+
     const style = getComputedStyle(el);
+    if (style.display === "none" || style.visibility === "hidden" || parseFloat(style.opacity || "1") < 0.05) {
+      continue;
+    }
     const overflowY = style.overflowY;
     if (overflowY !== "auto" && overflowY !== "scroll" && overflowY !== "overlay") continue;
-    const scrollableHeight = el.scrollHeight - el.clientHeight;
-    {
-      const rect = el.getBoundingClientRect();
-      if (rect.width > window.innerWidth * 0.6 && rect.height > window.innerHeight * 0.4) {
-        if (scrollableHeight > bestScore) {
-          bestScore = scrollableHeight;
-          best = el;
-        }
-      }
+
+    const rect = el.getBoundingClientRect();
+    // Intersect with window viewport
+    const intersectW = Math.max(0, Math.min(rect.right, winW) - Math.max(rect.left, 0));
+    const intersectH = Math.max(0, Math.min(rect.bottom, winH) - Math.max(rect.top, 0));
+    const visibleArea = intersectW * intersectH;
+
+    // Must occupy a meaningful visible portion of the viewport (at least 180px in each dimension and >= 8% area)
+    if (intersectW < 180 || intersectH < 180 || visibleArea < winArea * 0.08) continue;
+
+    // Center alignment bonus: main feed / chat conversation panes are centrally placed,
+    // whereas navigation sidebars sit at the edges.
+    const paneCenterX = (Math.max(rect.left, 0) + Math.min(rect.right, winW)) / 2;
+    const distFromCenter = Math.abs(paneCenterX - winW / 2) / (winW / 2);
+    const centerFactor = 1.0 - 0.25 * Math.min(1, distFromCenter);
+
+    // Sidebar penalty: narrow containers (<340px) pinned to the far left or right
+    let sidebarPenalty = 1.0;
+    if (rect.width < 340 && (rect.left <= 40 || rect.right >= winW - 40)) {
+      sidebarPenalty = 0.5;
+    }
+
+    // Combined score: balance visible presence and scroll capacity (SX-04)
+    const score = (visibleArea * 0.4 + Math.min(scrollableHeight, 15000) * 100 * 0.6) * centerFactor * sidebarPenalty;
+
+    scoredCandidates.push({ el, score, scrollRange: scrollableHeight });
+    if (score > bestScore) {
+      bestScore = score;
+      best = el;
+    }
+  }
+
+  if (scoredCandidates.length > 1) {
+    scoredCandidates.sort((a, b) => b.score - a.score);
+    const top = scoredCandidates[0]!;
+    const second = scoredCandidates[1]!;
+    if (second.score > top.score * 0.65) {
+      console.warn("[ScreenX] Multiple competing scroll panes detected; selecting dominant candidate", JSON.stringify({
+        chosen: `${top.el.tagName}#${top.el.id || "noid"} (score=${Math.round(top.score)}, range=${top.scrollRange})`,
+        alternate: `${second.el.tagName}#${second.el.id || "noid"} (score=${Math.round(second.score)}, range=${second.scrollRange})`,
+      }));
     }
   }
 

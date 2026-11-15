@@ -4,7 +4,7 @@
  * Single source; src/capture/ensureContent.ts re-exports for compat.
  */
 import { CaptureError } from "@/types/capture";
-import { CONTENT_PROTOCOL_VERSION } from "@/messaging/events";
+import { CONTENT_BUILD_ID, CONTENT_PROTOCOL_VERSION } from "@/messaging/events";
 import { isRestrictedUrl } from "../captureUtils";
 
 const PING_TIMEOUT_MS = 1500;
@@ -131,8 +131,16 @@ function tryPing(tabId: number): Promise<PingState> {
           return;
         }
         if (response && (response as { ok?: boolean }).ok) {
-          const proto = (response as { proto?: unknown }).proto;
-          resolve(proto === CONTENT_PROTOCOL_VERSION ? "ready" : "stale");
+          const resp = response as { proto?: unknown; buildId?: unknown };
+          if (resp.proto !== CONTENT_PROTOCOL_VERSION) {
+            resolve("stale");
+            return;
+          }
+          if (resp.buildId !== undefined && resp.buildId !== CONTENT_BUILD_ID) {
+            resolve("stale");
+            return;
+          }
+          resolve("ready");
         } else {
           resolve("missing");
         }

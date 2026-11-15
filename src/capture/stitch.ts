@@ -19,6 +19,11 @@ export interface StitchInput {
   dpr: number;
   occludedTopHeight?: number;
   occludedBottomHeight?: number;
+  /** SX-02: scroll pane client rect inside window */
+  paneTop?: number;
+  paneLeft?: number;
+  paneWidth?: number;
+  paneHeight?: number;
 }
 
 export async function stitchImages(input: StitchInput) {
@@ -32,6 +37,10 @@ export async function stitchImages(input: StitchInput) {
     occludedBottomHeight: input.occludedBottomHeight,
     totalWidth: input.totalWidth,
     totalHeight: input.totalHeight,
+    paneTop: input.paneTop,
+    paneLeft: input.paneLeft,
+    paneWidth: input.paneWidth,
+    paneHeight: input.paneHeight,
   });
 
   return await stitcher.stitch();
