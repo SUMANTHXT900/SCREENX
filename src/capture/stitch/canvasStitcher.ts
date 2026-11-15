@@ -451,18 +451,22 @@ export class CanvasStitcher implements Stitcher {
           continue;
         }
 
-        const globalLeft = Math.round((rectLeft + sliceDocLeft) * scaleX);
-        const globalRight = Math.round((rectLeft + sliceDocRight) * scaleX);
-        const globalTop = Math.round((rectTop + sliceDocTop) * scaleY);
-        const globalBottom = Math.round((rectTop + sliceDocBottom) * scaleY);
+        // Source pixel mapping: content at document coordinate D is at
+        // viewport position rectOffset + (D − scrollOffset). The bitmap
+        // pixel = round(viewportPos * bitmapScale). Previous code added
+        // rectLeft/rectTop to BOTH content and scroll coords, so they
+        // cancelled — losing the pane offset entirely (SX-01 fix).
+        const screenLeft = rectLeft + (sliceDocLeft - vpX);
+        const screenRight = rectLeft + (sliceDocRight - vpX);
+        const screenTop = rectTop + (sliceDocTop - vpY);
+        const screenBottom = rectTop + (sliceDocBottom - vpY);
 
-        const globalVpX = Math.round((rectLeft + vpX) * scaleX);
-        const globalVpY = Math.round((rectTop + vpY) * scaleY);
-
-        const srcX = Math.max(0, globalLeft - globalVpX);
-        let srcY = Math.max(0, globalTop - globalVpY);
-        const srcW = Math.min(bmp.width - srcX, globalRight - globalLeft);
-        let srcH = Math.min(bmp.height - srcY, globalBottom - globalTop);
+        const srcX = Math.max(0, Math.round(screenLeft * scaleX));
+        let srcY = Math.max(0, Math.round(screenTop * scaleY));
+        const srcRight = Math.min(bmp.width, Math.round(screenRight * scaleX));
+        const srcBottom = Math.min(bmp.height, Math.round(screenBottom * scaleY));
+        const srcW = Math.min(bmp.width - srcX, srcRight - srcX);
+        let srcH = Math.min(bmp.height - srcY, srcBottom - srcY);
 
         // Destinations use the CANVAS scale (target-relative, not differenced
         // rounded absolutes) so spans match the canvas at fractional DPR even
